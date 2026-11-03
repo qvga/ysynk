@@ -6,6 +6,8 @@ Use the Rust and Node.js versions pinned in `rust-toolchain.toml` and `.nvmrc`.
 On Linux, install a C compiler, pkg-config, GTK3, WebKitGTK 4.1, AppIndicator
 and D-Bus development libraries. Running backups also requires restic 0.17.1
 or newer and a persistent Secret Service keychain.
+The checks use Python 3; Unix detached-process regressions invoke
+`/usr/bin/python3` inside disposable fixtures.
 
 ```sh
 npm ci
@@ -45,6 +47,14 @@ Tests use temporary repositories and injected credentials. Never use an
 existing user's keychain for automated tests. Native-provider tests require an
 isolated session and disposable credential store. Screenshots in the README
 use sample data, not evidence of a completed backup.
+
+For offline browser regression checks, run `npm run build` followed by
+`node ui/audit-fixture.mjs`. Open the generated `target/audit-ui/index.html` in
+a separate browser tab and run `await verifyAuditUi()` in its console on a
+fresh load. This exercises the real bundled UI with in-memory IPC responses;
+it does not connect to the native engine or keychain. Check both audited
+window sizes (1120×800 and 720×580), themes, keyboard navigation, console errors
+and failed requests. Native integration still needs separate verification.
 
 ## Packaging
 

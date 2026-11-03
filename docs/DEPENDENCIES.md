@@ -30,6 +30,11 @@ and selection; `npm run test:dependencies` checks real plugin resolution and
 merge regressions. Re-run `tools/check_advisories.py` after lockfile changes.
 Network failure means unavailable, not zero findings.
 
+The advisory inventory uses upstream npm names for aliases and queries local
+backports from their manifests rather than their filesystem paths. Unsupported
+or incomplete npm lockfile inventories fail the check. `npm audit` does not
+replace this query: it can report zero while local-file version findings remain.
+
 The single-instance plugin currently uses zbus 5. Its standalone `zbus_names`,
 `zvariant` and `zvariant_derive` dependencies have unmaintained-package
 advisories (RUSTSEC-2026-0371, RUSTSEC-2026-0370 and RUSTSEC-2026-0372) because
@@ -37,6 +42,13 @@ they were merged into zbus 6. They remain in the pinned plugin's dependency
 graph; the raw report retains these findings, alongside `proc-macro-error`'s
 unmaintained-package advisory. Updating that plugin to a zbus-6-based release
 is separate dependency maintenance, not a suppressed finding.
+
+External restic and its compiled Go runtime are not covered by Cargo/npm
+lockfile checks. `docs/audit-runtime-advisories.json` records the audit host's
+version-only results, not verified reachable vulnerabilities or an inventory
+of every installation. Keep the system restic package and its compiler/runtime
+security updates current; evaluate distribution backports before interpreting
+version matches. This audit did not change system packages.
 
 ## Notices
 

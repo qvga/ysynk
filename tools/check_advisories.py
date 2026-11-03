@@ -29,9 +29,16 @@ def main():
     packages = {(p["name"], p["version"], "crates.io")
                 for p in cargo["package"] if not p['name'].startswith('ysynk-')}
     npm = json.loads((root / "package-lock.json").read_text())
-    for path, package in npm.get("packages", {}).items():
-        if path and package.get("version"):
-            packages.add((path.rsplit("node_modules/", 1)[-1], package["version"], "npm"))
+    inventory = npm.get("packages")
+    if (npm.get("lockfileVersion") not in (2, 3)
+            or not isinstance(inventory, dict) or "" not in inventory):
+        raise ValueError("Unsupported or incomplete npm lockfile package inventory")
+    for path, package in inventory.items():
+        # Link targets are filesystem paths, not npm names. Vendored packages
+        # are added below from their manifest; aliases use their upstream name.
+        if "node_modules/" in path and package.get("version"):
+            name = package.get("name") or path.rsplit("node_modules/", 1)[-1]
+            packages.add((name, package["version"], "npm"))
     # Local patches retain their real upstream versions. They must not disappear
     # from a version advisory report merely because npm represents them as links.
     for manifest in (root/'vendor').glob('*/package.json'):

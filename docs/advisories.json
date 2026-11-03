@@ -1,6 +1,6 @@
 {
   "database": "OSV public RustSec/npm data",
-  "packages_checked": 576,
+  "packages_checked": 575,
   "findings": [
     {
       "package": "deepmerge",

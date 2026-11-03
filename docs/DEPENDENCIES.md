@@ -30,6 +30,14 @@ and selection; `npm run test:dependencies` checks real plugin resolution and
 merge regressions. Re-run `tools/check_advisories.py` after lockfile changes.
 Network failure means unavailable, not zero findings.
 
+The single-instance plugin currently uses zbus 5. Its standalone `zbus_names`,
+`zvariant` and `zvariant_derive` dependencies have unmaintained-package
+advisories (RUSTSEC-2026-0371, RUSTSEC-2026-0370 and RUSTSEC-2026-0372) because
+they were merged into zbus 6. They remain in the pinned plugin's dependency
+graph; the raw report retains these findings, alongside `proc-macro-error`'s
+unmaintained-package advisory. Updating that plugin to a zbus-6-based release
+is separate dependency maintenance, not a suppressed finding.
+
 ## Notices
 
 ysynk remains Apache-2.0. External restic retains its BSD 2-Clause notice in

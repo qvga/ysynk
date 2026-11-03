@@ -69,6 +69,14 @@ With the password and any separate SSH/cloud access, the unmodified restic CLI
 can inspect and restore the repository. No local application history/catalog is
 required. Test recovery independently before relying on it.
 
+## Desktop startup
+
+Start-at-login registration is opt-in and launches the application's executable in
+the user's desktop session, not a privileged boot service. Desktop preferences
+contain no credentials. Instances using a custom `YSYNK_RESTIC_DATA_DIR` cannot
+modify the installed application's login registration. A usable tray host is
+required before a window is hidden; manual launches show the window.
+
 ## Destructive actions and concurrency
 
 Retention previews are profile-tag scoped, expiring, single-use and bound to

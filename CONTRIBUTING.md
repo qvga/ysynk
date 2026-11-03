@@ -16,6 +16,11 @@ For frontend hot reload, start `npm run dev` yourself and run `npm run desktop`
 in a second terminal. `YSYNK_RESTIC_DATA_DIR` overrides the configuration
 directory, but does not isolate the OS keychain namespace.
 
+Instances using `YSYNK_RESTIC_DATA_DIR` do not manage desktop-login autostart;
+they must not change the installed application's startup registration. Test
+autostart with isolated HOME/XDG paths and a private session bus, not the host's
+login files. Minimized startup applies to `--autostart` launches only.
+
 ## Checks
 
 ```sh

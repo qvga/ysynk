@@ -3,7 +3,8 @@ fn main() {
         tauri_build::AppManifest::new().commands(&[
             "request",
             "export_repository_password",
-            "set_hide_to_tray",
+            "get_desktop_settings",
+            "save_desktop_settings",
             "quit",
         ]),
     ))

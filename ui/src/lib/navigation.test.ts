@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { render } from 'svelte/server';
 import App from '../App.svelte';
 import Activity from './Activity.svelte';
-import type { Job } from './types';
+import Preferences from './Preferences.svelte';
+import type { Job, Status } from './types';
 
 describe('navigation and operation history', () => {
   it('opens Profiles and provides only the four configuration and restore views', () => {
@@ -36,5 +37,20 @@ describe('navigation and operation history', () => {
     for (const evidence of ['partial', 'success', 'failed', 'Local disk', 'remote', 'abcdef123456', 'System keychain is locked.']) {
       expect(body).toContain(evidence);
     }
+  });
+});
+
+describe('startup settings', () => {
+  it('shows loading without inventing startup preferences before native settings arrive', () => {
+    const status: Status = {
+      config: { revision: 0, restic_path: '/usr/bin/restic', repositories: [], profiles: [] },
+      active: null, history: [], restic_version: 'restic 0.18.1', setup_error: null,
+    };
+    const { body } = render(Preferences, { props: { status, busy: false, save: async () => null, theme: 'system', changeTheme: () => {} } });
+    expect(body).toContain('Loading startup settings…');
+    expect(body).not.toContain('type="checkbox"');
+    expect(body).not.toContain('Save startup settings');
+    expect(body).toContain('manual launches show the window');
+    expect(body).not.toContain('Applies to this running application session');
   });
 });

@@ -1,4 +1,6 @@
 export interface Repository { id: string; label: string; location: string }
+export interface DesktopPreferences { start_at_login: boolean; start_minimized: boolean; hide_to_tray: boolean }
+export interface DesktopSettings extends DesktopPreferences { tray_available: boolean; autostart_supported: boolean }
 export interface Retention { keep_last: number; keep_daily: number; keep_weekly: number; keep_monthly: number }
 export interface Profile { id: string; label: string; sources: string[]; excludes: string[]; repository_ids: string[]; schedule_minutes: number; retention: Retention }
 export interface Config { revision: number; restic_path: string; repositories: Repository[]; profiles: Profile[] }

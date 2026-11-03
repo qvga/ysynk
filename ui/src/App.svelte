@@ -19,7 +19,6 @@
   let sending = $state(false);
   let waiting = $state(false);
   let theme = $state('system');
-  let hideToTray = $state(false);
   let polling = $state(false);
   let generation = 0;
   let alive = true;
@@ -106,7 +105,7 @@
          {#if page === 'Profiles'}<Profiles {status} {busy} {ready} {save} {action}/><section class="profile-history" aria-labelledby="activity-heading"><div class="section-heading"><h2 id="activity-heading">Operation history</h2></div><Activity jobs={status.history.filter(job => job.id !== status?.active?.id)} repositories={config.repositories}/></section>
         {:else if page === 'Repositories'}<Repositories {status} {busy} {ready} {save} {run} {action}/>
         {:else if page === 'Snapshots'}<Snapshots {status} {busy} {ready} {run}/>
-        {:else}<Preferences {status} {busy} {save} {theme} changeTheme={setTheme} tray={hideToTray} changeTray={(enabled) => hideToTray = enabled}/>{/if}
+        {:else}<Preferences {status} {busy} {save} {theme} changeTheme={setTheme}/>{/if}
       {/if}
     </main>
      {#if status?.active}<aside class="jobbar" aria-label="Current operation"><div class="grow"><strong>{status.active.label || status.active.kind}</strong><p class="small muted">{status.active.message || 'Operation running. Other repository operations wait until this finishes.'}</p>{#if status.active.progress?.percent != null}<progress max="100" value={status.active.progress.percent} aria-label="Current operation progress"></progress>{/if}{#if status.active.destinations.length}<details><summary>Live destination results</summary><ul class="destination-results">{#each status.active.destinations as destination}<li><strong>{status.config.repositories.find(repo => repo.id === destination.repository_id)?.label ?? destination.repository_id}</strong><span class:bad={['failed', 'partial', 'interrupted'].includes(destination.state)}>{destination.state}</span><span class="muted">{destination.message}</span></li>{/each}</ul></details>{/if}</div><button onclick={cancel}>Cancel operation</button></aside>{/if}

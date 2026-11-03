@@ -21,14 +21,15 @@ Screenshots show the application interface with sample data.
 - Retention previews with explicit deletion confirmation; separate pruning.
 - System keychain credentials and explicit password export for recovery.
 - Light/dark themes, tray operation and Linux desktop notifications.
+- Start at desktop login, optional minimized startup and persistent tray settings.
 
 ## Install
 
-The [0.5.0 release](https://github.com/qvga/ysynk/releases/tag/v0.5.0) provides
+The [0.5.1 release](https://github.com/qvga/ysynk/releases/tag/v0.5.1) provides
 Linux x86-64 assets. For Debian/Ubuntu, download the `.deb` and install it:
 
 ```sh
-sudo apt install ./ysynk_0.5.0_amd64.deb
+sudo apt install ./ysynk_0.5.1_amd64.deb
 ```
 
 The package requires restic **0.17.1 or newer**, GTK3, WebKitGTK 4.1 and
@@ -56,6 +57,36 @@ not been validated. Safe restore currently requires Linux.
 
 Retention and prune operations are in **Repositories**. Deletion requires a
 preview and confirmation. Existing restore output paths are not overwritten.
+
+### Start automatically
+
+In **Settings → Startup and window behavior**:
+
+1. Enable **Start at login**.
+2. Enable **Hide to tray when the window closes** and confirm the tray icon is
+   visible and its menu can be opened.
+3. Optionally enable **Start minimized**, then save the settings.
+
+These preferences persist across restarts. Minimized startup applies to login
+launches only; opening ysynk manually shows the window. If a usable tray host is
+unavailable at startup, the window remains visible. **Quit ysynk** stops the
+application even when hide-to-tray is enabled.
+
+Autostart runs after desktop login, not before login as a system service. Backup
+profiles still need an interval; changes are not watched continuously. Backups
+cannot run while the computer is off or asleep, and the desktop keychain and
+repositories must be available. An executable archive must stay at the path
+where autostart was enabled; after moving it, disable and re-enable autostart.
+The checkbox reports registration state, not whether the registered executable
+still exists. Login registration is unavailable for data-directory overrides
+or executable paths containing spaces or unsupported special characters; the
+Debian package uses a supported path.
+
+If you previously followed the manual autostart instructions and created a
+`ysynk.desktop` entry without `--autostart`, move that entry out of
+`$XDG_CONFIG_HOME/autostart/` (normally `~/.config/autostart/`), then reload
+Settings before enabling Start at login. Unrecognized existing entries are not
+replaced automatically.
 
 ### Credentials and recovery
 

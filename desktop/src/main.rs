@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod settings;
+mod tray_host;
+
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -15,8 +18,10 @@ use ysynk_core::{App, Request};
 
 struct Desktop {
     core: Arc<App>,
-    hide_to_tray: AtomicBool,
-    tray_available: AtomicBool,
+    settings: settings::Service,
+    tray_created: AtomicBool,
+    hidden_to_tray: AtomicBool,
+    manual_reopen: Arc<AtomicBool>,
     shutting_down: AtomicBool,
     drained: AtomicBool,
     exporting_password: Arc<AtomicBool>,
@@ -105,15 +110,90 @@ async fn request(
         .map_err(|error| error.to_string())
 }
 
-#[tauri::command]
-fn set_hide_to_tray(enabled: bool, state: tauri::State<'_, Desktop>) -> Result<(), String> {
-    if enabled && !state.tray_available.load(Ordering::Relaxed) {
-        return Err(
-            "A tray icon could not be created. Keep the window open for background backups.".into(),
-        );
+fn settings_caller(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() == "main" {
+        Ok(())
+    } else {
+        Err("Desktop settings are only available in the main window.".into())
     }
-    state.hide_to_tray.store(enabled, Ordering::Relaxed);
-    Ok(())
+}
+
+#[tauri::command]
+async fn get_desktop_settings(
+    window: tauri::WebviewWindow,
+    handle: tauri::AppHandle,
+) -> Result<settings::Settings, String> {
+    settings_caller(&window)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = handle.state::<Desktop>();
+        if state.shutting_down.load(Ordering::Acquire) {
+            return Err("ysynk is shutting down.".into());
+        }
+        state.settings.get(tray_available(&handle))
+    })
+    .await
+    .map_err(|_| "Could not read desktop settings. Reload before retrying.".to_owned())?
+}
+
+#[tauri::command]
+async fn save_desktop_settings(
+    settings: settings::Input,
+    window: tauri::WebviewWindow,
+    handle: tauri::AppHandle,
+) -> Result<settings::Settings, String> {
+    settings_caller(&window)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = handle.state::<Desktop>();
+        if state.shutting_down.load(Ordering::Acquire) {
+            return Err("ysynk is shutting down; desktop settings were not changed.".into());
+        }
+        state.settings.save(settings, tray_available(&handle))
+    })
+    .await
+    .map_err(|_| {
+        "Desktop settings could not finish saving. Reload native settings before retrying."
+            .to_owned()
+    })?
+}
+
+fn tray_available(handle: &tauri::AppHandle) -> bool {
+    handle
+        .state::<Desktop>()
+        .tray_created
+        .load(Ordering::Acquire)
+        && tray_host::available()
+}
+
+fn login_store(handle: &tauri::AppHandle, data_override: bool) -> Box<dyn settings::Autostart> {
+    // The override represents a different configuration. Never inspect, remove
+    // or modify the normal configuration's OS login registration from it.
+    if data_override {
+        return Box::new(settings::DisabledAutostart);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let executable = handle
+            .env()
+            .appimage
+            .map(std::path::PathBuf::from)
+            .or_else(|| std::env::current_exe().ok())
+            .unwrap_or_default();
+        Box::new(settings::XdgAutostart {
+            directory: dirs::config_dir(),
+            executable,
+        })
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        Box::new(settings::PlatformAutostart {
+            handle: handle.clone(),
+            executable: std::env::current_exe().unwrap_or_default(),
+        })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        Box::new(settings::DisabledAutostart)
+    }
 }
 
 fn begin_shutdown(handle: &tauri::AppHandle) {
@@ -127,6 +207,7 @@ fn begin_shutdown(handle: &tauri::AppHandle) {
         // The runtime retains its instance lock until its subprocess has been
         // cancelled and reaped. Never abandon a running restic process.
         core.shutdown();
+        handle.state::<Desktop>().settings.close();
         handle
             .state::<Desktop>()
             .drained
@@ -141,6 +222,10 @@ fn quit(handle: tauri::AppHandle) {
 }
 
 fn show(handle: &tauri::AppHandle) {
+    if let Some(state) = handle.try_state::<Desktop>() {
+        state.manual_reopen.store(true, Ordering::Release);
+        state.hidden_to_tray.store(false, Ordering::Release);
+    }
     if let Some(window) = handle.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();
@@ -192,7 +277,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         })
         .build(app)?;
     app.state::<Desktop>()
-        .tray_available
+        .tray_created
         .store(true, Ordering::Relaxed);
     Ok(())
 }
@@ -238,24 +323,65 @@ fn notify(state: &str) {
 fn notify(_state: &str) {}
 
 fn main() {
-    let application = tauri::Builder::default()
+    let data_override = std::env::var_os("YSYNK_RESTIC_DATA_DIR").is_some();
+    let login_launch = settings::is_login_launch(std::env::args_os());
+    let manual_reopen = Arc::new(AtomicBool::new(false));
+    let activation = manual_reopen.clone();
+    let mut builder = tauri::Builder::default();
+    // Register first. Overrides intentionally use only the core data-dir lock,
+    // not the production app's global activation identity.
+    if !data_override {
+        builder = builder.plugin(tauri_plugin_single_instance::init(
+            move |handle, arguments, _| {
+                if !settings::is_login_launch(arguments) {
+                    activation.store(true, Ordering::Release);
+                    show(handle);
+                }
+            },
+        ));
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if !data_override {
+        builder = builder.plugin(
+            tauri_plugin_autostart::Builder::new()
+                .args(["--autostart"])
+                .app_name("ysynk")
+                .build(),
+        );
+    }
+    let application = builder
         .plugin(tauri_plugin_dialog::init())
-        .setup(|app| {
+        .setup(move |app| {
             let directory = std::env::var_os("YSYNK_RESTIC_DATA_DIR")
                 .map(std::path::PathBuf::from)
                 .unwrap_or(app.path().app_local_data_dir()?.join("restic"));
-            let core = App::open(directory)?;
-            app.manage(Desktop { core: core.clone(), hide_to_tray: AtomicBool::new(false), tray_available: AtomicBool::new(false), shutting_down: AtomicBool::new(false), drained: AtomicBool::new(false), exporting_password: Arc::new(AtomicBool::new(false)) });
+            let core = App::open(directory.clone())?;
+            let settings = settings::Service::new(Box::new(settings::FilePreferences(directory.join("desktop-settings.json"))), login_store(app.handle(), data_override));
+            app.manage(Desktop { core: core.clone(), settings, tray_created: AtomicBool::new(false), hidden_to_tray: AtomicBool::new(false), manual_reopen: manual_reopen.clone(), shutting_down: AtomicBool::new(false), drained: AtomicBool::new(false), exporting_password: Arc::new(AtomicBool::new(false)) });
             // Creation is not proof that a desktop tray host is visible. The
             // user must explicitly opt in after checking the native menu.
             if setup_tray(app).is_err() {
                 eprintln!("Tray unavailable; keep the window open for background scheduling.");
+            }
+            let available = tray_available(app.handle());
+            let state = app.state::<Desktop>();
+            let read_ok = state.settings.get(available).is_ok();
+            if !read_ok { eprintln!("Desktop settings unavailable; starting with the window visible."); }
+            if !read_ok || !settings::start_hidden(login_launch, state.settings.preferences(), available, manual_reopen.load(Ordering::Acquire)) {
+                show(app.handle());
+            } else {
+                state.hidden_to_tray.store(true, Ordering::Release);
             }
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 let mut observed = std::collections::HashSet::<String>::new();
                 let mut initialized = false;
                 while !handle.state::<Desktop>().shutting_down.load(Ordering::Relaxed) {
+                    // If a tray host disappears, a hidden app must become
+                    // reachable again. Never hide later when a host appears.
+                    if handle.state::<Desktop>().hidden_to_tray.load(Ordering::Acquire) && !tray_available(&handle) {
+                        show(&handle);
+                    }
                     core.tick();
                     if let Ok(status) = core.request(Request::Status) {
                         if let Some(jobs) = status["history"].as_array() {
@@ -276,13 +402,15 @@ fn main() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![request, export_repository_password, set_hide_to_tray, quit])
+        .invoke_handler(tauri::generate_handler![request, export_repository_password, get_desktop_settings, save_desktop_settings, quit])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<Desktop>();
-                if state.hide_to_tray.load(Ordering::Relaxed) && state.tray_available.load(Ordering::Relaxed) {
+                if state.settings.preferences().hide_to_tray && tray_available(window.app_handle()) {
                     api.prevent_close();
-                    let _ = window.hide();
+                    if window.hide().is_ok() {
+                        state.hidden_to_tray.store(true, Ordering::Release);
+                    }
                 }
             }
         })

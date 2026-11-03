@@ -1,6 +1,6 @@
 {
   "database": "OSV public RustSec/npm data",
-  "packages_checked": 533,
+  "packages_checked": 576,
   "findings": [
     {
       "package": "deepmerge",
@@ -25,6 +25,30 @@
       "ecosystem": "crates.io",
       "advisories": [
         "RUSTSEC-2024-0370"
+      ]
+    },
+    {
+      "package": "zbus_names",
+      "version": "4.3.5",
+      "ecosystem": "crates.io",
+      "advisories": [
+        "RUSTSEC-2026-0371"
+      ]
+    },
+    {
+      "package": "zvariant",
+      "version": "5.15.1",
+      "ecosystem": "crates.io",
+      "advisories": [
+        "RUSTSEC-2026-0370"
+      ]
+    },
+    {
+      "package": "zvariant_derive",
+      "version": "5.15.1",
+      "ecosystem": "crates.io",
+      "advisories": [
+        "RUSTSEC-2026-0372"
       ]
     }
   ],

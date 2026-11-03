@@ -16,7 +16,7 @@
   async function submit(event: SubmitEvent) {
     event.preventDefault(); if (!draft || !repository) return;
     if (draft.revision !== status.config.revision) { error = 'Configuration changed. Cancel and reopen this dialog.'; return; }
-    const updated = { ...repository, label: repository.label.trim(), location: repository.location.trim() };
+    const updated = { ...repository, label: repository.label.trim() };
     const next = copyConfig(draft);
     next.repositories = editing ? next.repositories.map(repo => repo.id === updated.id ? updated : repo) : [...next.repositories, updated];
     saving = true; const problem = await save(next); saving = false;

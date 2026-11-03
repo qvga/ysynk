@@ -17,7 +17,11 @@
     dialog.querySelector<HTMLElement>('input:not([type="checkbox"]), textarea, select')?.focus();
     const revealInvalid = (event: Event) => { const field = event.target as HTMLElement; const details = field.closest('details'); if (details) details.open = true; };
     dialog.addEventListener('invalid', revealInvalid, true);
-    return () => { dialog.removeEventListener('invalid', revealInvalid, true); dialog.close(); if (trigger?.isConnected) trigger.focus(); else document.querySelector<HTMLElement>('main .list-toolbar button')?.focus(); };
+    return () => {
+      dialog.removeEventListener('invalid', revealInvalid, true); dialog.close();
+      if (trigger?.isConnected && !trigger.matches(':disabled')) trigger.focus();
+      else (document.querySelector<HTMLElement>('.jobbar button:not(:disabled)') ?? document.querySelector<HTMLElement>('main .list-toolbar button:not(:disabled)') ?? document.querySelector<HTMLElement>('main'))?.focus();
+    };
   });
 </script>
 

@@ -31,18 +31,21 @@
   }
   function toggle(node: FileNode) { selectedPaths = selectedPaths.includes(node.path) ? selectedPaths.filter(item => item !== node.path) : [...selectedPaths, node.path]; }
   function openRestore(full: boolean) { if (!repository || !snapshot || snapshotScope !== scope) return; restore = { repository_id: repository.id, snapshot_id: snapshot.id, paths: full ? [] : [...selectedPaths], scope }; target = ''; restoreError = ''; }
-  function closeRestore() { if (!restoring) restore = null; }
+  function closeRestore() { restore = null; }
   async function submitRestore(event: SubmitEvent) {
-    event.preventDefault(); if (!restore) return;
+    event.preventDefault(); if (!restore || restoring) return;
     if (restore.scope !== scope || restore.snapshot_id !== snapshot?.id) { restoreError = 'Repository or snapshot selection changed. Close this dialog and choose the restore again.'; return; }
     restoring = true; restoreError = ''; notice = '';
-    const captured = { ...restore }; const output = target.trim();
+    const captured = restore; const output = target;
     try {
       const job = await run({ op: 'restore', repository_id: captured.repository_id, snapshot_id: captured.snapshot_id, paths: captured.paths, target: output });
       if (job.state !== 'success') throw new Error(`${job.message || `Restore ${job.state}.`} Any incomplete output is preserved at the requested target. Inspect it before trying a different new target.`);
       if (captured.scope === scope && captured.snapshot_id === snapshot?.id) notice = `Restore completed to ${output}.`;
-      restore = null;
-    } catch (cause) { restoreError = cause instanceof Error ? cause.message : 'Restore failed. Incomplete output is preserved; inspect the requested target before retrying.'; }
+      if (restore === captured) restore = null;
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : 'Restore failed. Incomplete output is preserved; inspect the requested target before retrying.';
+      if (restore === captured) restoreError = message; else error = message;
+    }
     finally { restoring = false; }
   }
   function parent(path: string) { return path.replace(/\/+$/, '').split('/').slice(0, -1).join('/') || '/'; }
@@ -70,7 +73,8 @@
   {#if restoreError}<p class="message error" role="alert">{restoreError}</p>{/if}
   <p class="dialog-intro">{repository?.label} · <code>{restore.snapshot_id.slice(0, 12)}</code></p>
   {#if restore.paths.length}<ul class="restore-paths">{#each restore.paths as selectedPath}<li class="path">{selectedPath}</li>{/each}</ul><p class="hint">Exact snapshot paths only. Wildcards in names remain literal.</p>{:else}<p class="hint">Restore all files in this snapshot.</p>{/if}
-  <label>New output directory<input required class="path" bind:value={target} placeholder="/home/you/Restored/backup-2026-11-02"/><span class="field-hint">An absolute native path that does not exist, under a safe existing parent directory. No existing output is overwritten.</span></label>
+  <label>New output directory<input required disabled={restoring} class="path" bind:value={target} placeholder="/home/you/Restored/backup-2026-11-02"/><span class="field-hint">An absolute native path that does not exist, under a safe existing parent directory. No existing output is overwritten.</span></label>
   <p class="message warning">ysynk creates a new private output directory and verifies the restore. If the operation fails or is cancelled, incomplete output is kept for inspection. A retry needs a different new target.</p>
-  <div class="dialog-actions"><button type="button" disabled={restoring} onclick={closeRestore}>Cancel</button><button class="primary" disabled={busy || restoring || !ready}>{restoring ? 'Restoring…' : 'Restore to new directory'}</button></div>
+  {#if restoring}<p class="hint" role="status">The restore continues when you close this dialog. Use Cancel operation in the activity bar to stop it.</p>{/if}
+  <div class="dialog-actions"><button type="button" onclick={closeRestore}>{restoring ? 'Close dialog' : 'Cancel'}</button><button class="primary" disabled={busy || restoring || !ready}>{restoring ? 'Restoring…' : 'Restore to new directory'}</button></div>
 </form></Dialog>{/if}

@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { assertSuccess, files, isCurrent, preview, snapshots } from './model';
+import { assertSuccess, files, isCurrent, lines, preview, snapshots } from './model';
 import type { Job } from './types';
 
 describe('query results', () => {
+  it('preserves spaces in source paths and exclusion patterns when separating lines', () => {
+    expect(lines('/home/user/Documents \r\n\n **/draft \n  ')).toEqual(['/home/user/Documents ', ' **/draft ', '  ']);
+  });
   it('rejects a completion when the repository or request has changed', () => {
     expect(isCurrent(2, 2, 'repo-a:snapshot-a:/', 'repo-b:snapshot-a:/')).toBe(false);
     expect(isCurrent(2, 3, 'repo-a:snapshot-a:/', 'repo-a:snapshot-a:/')).toBe(false);

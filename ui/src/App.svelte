@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { request, inDesktop } from './lib/client';
+  import { JobCompletions } from './lib/jobs';
   import type { Config, Job, Request, Status } from './lib/types';
   import Icon from './lib/Icon.svelte';
   import Activity from './lib/Activity.svelte';
@@ -21,25 +22,24 @@
   let theme = $state('system');
   let polling = $state(false);
   let generation = 0;
+  let statusSequence = 0;
   let alive = true;
-  const pending = new Map<string, { resolve: (job: Job) => void; reject: (error: Error) => void }>();
+  const pending = new JobCompletions();
   let busy = $derived(sending || waiting || !!status?.active || !!connection);
   let ready = $derived(!!status && !status.setup_error && !!status.restic_version);
   let config = $derived(status?.config);
-  function accept(next: Status) {
+  function accept(next: Status, sequence = 0) {
     if (!alive) return;
     status = next; connection = '';
-    for (const job of next.history) {
-      const waiter = pending.get(job.id);
-      if (waiter && job.state !== 'running') { pending.delete(job.id); waiter.resolve(job); }
-    }
+    pending.accept(next, sequence);
     waiting = pending.size > 0;
   }
   async function refresh() {
     if (polling || !alive) return;
     polling = true;
     const stamp = generation;
-    try { const next = await request<Status>({ op: 'status' }); if (stamp === generation) accept(next); }
+    const sequence = ++statusSequence;
+    try { const next = await request<Status>({ op: 'status' }); if (stamp === generation) accept(next, sequence); }
     catch (cause) { if (alive && stamp === generation) connection = cause instanceof Error ? cause.message : 'The local engine is unavailable. Reopen ysynk and try again.'; }
     finally { polling = false; }
   }
@@ -49,10 +49,10 @@
     try {
       const response = await request<{ job_id: string }>(operation);
       if (!response.job_id) throw new Error('The engine did not return a job ID. Reconnect before trying again.');
-      const result = new Promise<Job>((resolve, reject) => pending.set(response.job_id, { resolve, reject }));
+      const result = pending.wait(response.job_id, statusSequence);
       waiting = true;
-      // A quick query may finish before its admission response reaches the UI.
-      if (status) accept(status);
+      // A pre-admission poll may still be in flight. Only a later poll can
+      // establish that this job completed or fell out of retained history.
       void refresh();
       return await result;
     } finally { sending = false; }
@@ -82,7 +82,7 @@
     try { const value = localStorage.getItem('ysynk-theme'); if (value && ['light', 'dark', 'system'].includes(value)) theme = value; } catch { /* Use the system theme. */ }
     void refresh();
     const timer = setInterval(() => { if (inDesktop()) void refresh(); }, 1000);
-    return () => { alive = false; clearInterval(timer); for (const waiter of pending.values()) waiter.reject(new Error('The interface closed before the operation completed.')); pending.clear(); };
+    return () => { alive = false; clearInterval(timer); pending.close(); };
   });
 </script>
 

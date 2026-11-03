@@ -1,6 +1,6 @@
 import type { Config, Job, Snapshot, FileNode, RetentionPreview } from './types';
 
-export function lines(value: string): string[] { return value.split('\n').map(line => line.trim()).filter(Boolean); }
+export function lines(value: string): string[] { return value.split(/\r?\n/).filter(line => line.length > 0); }
 export function copyConfig(config: Config): Config { return JSON.parse(JSON.stringify(config)) as Config; }
 export function bytes(value?: number): string {
   if (value == null || !Number.isFinite(value)) return 'Not reported';

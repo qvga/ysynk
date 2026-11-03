@@ -42,6 +42,7 @@ struct State {
     previews: HashMap<String, Preview>,
     version: Option<String>,
     setup_error: Option<String>,
+    persistence_failed: bool,
 }
 pub struct App {
     directory: PathBuf,
@@ -145,6 +146,7 @@ impl App {
                 previews: HashMap::new(),
                 version,
                 setup_error,
+                persistence_failed: false,
             }),
             export_finished: Condvar::new(),
             workers: Mutex::new(vec![]),
@@ -173,6 +175,13 @@ impl App {
     }
     fn expire(state: &mut State) {
         state.previews.retain(|_, p| p.expires > now());
+    }
+    fn persistence_failed(state: &mut State) {
+        state.persistence_failed = true;
+        state.previews.clear();
+        state.setup_error = Some(
+            "Could not durably save application data; restart the app before continuing".into(),
+        );
     }
     fn status(&self, state: &mut State) -> Result<Value> {
         Self::expire(state);
@@ -206,6 +215,10 @@ impl App {
         revision: u64,
     ) -> Result<Repository> {
         ensure!(
+            !state.persistence_failed,
+            "Could not durably save application data; restart the app before continuing"
+        );
+        ensure!(
             !self.closing.load(Ordering::Acquire),
             "App is shutting down; password export was not completed"
         );
@@ -238,7 +251,17 @@ impl App {
             state.password_export = true;
             (repo, state.config.clone(), PasswordExport(self))
         };
-        let target = password_export_target(&configuration, &self.directory, &target)?;
+        let validated_target = password_export_target(&configuration, &self.directory, &target)?;
+        // Pin the trusted parent before reading any secret. All subsequent
+        // staging, cleanup and publication use this descriptor, not its pathname.
+        let parent_handle = password_export_parent(&target).map_err(|_| anyhow::anyhow!(
+            "Choose an existing trusted password folder without symlinks; safe password export requires Linux"
+        ))?;
+        let target = pinned_export_target(&parent_handle, &target)?;
+        ensure!(
+            password_export_target(&configuration, &self.directory, &target)? == validated_target,
+            "Password export folder changed; select the destination again"
+        );
         // Native calls may block. Never hold the state mutex across this read.
         // required() is read-only and checks the stored version and locator.
         let record = credentials::required(self.credentials.as_ref(), &repo)?;
@@ -271,12 +294,7 @@ impl App {
                     "Could not write and sync the password file; no export was completed"
                 )
             })?;
-        // The reservation prevents config saves and job admission without
-        // blocking status. Recheck directory links outside the state mutex.
-        ensure!(
-            password_export_target(&configuration, &self.directory, &target)? == target,
-            "Password export folder changed; select the destination again"
-        );
+        // The pinned parent remains authoritative even if an ancestor moves.
         {
             let state = self.state.lock().unwrap();
             let current = self.export_selection(&state, repository_id, revision)?;
@@ -290,8 +308,11 @@ impl App {
                 "Could not save a new password file; existing files are never overwritten"
             )
         })?;
-        // Nothing fallible after publication: never attempt a path-based
-        // rollback that could remove a file another process replaced.
+        // Publication is irreversible here. Report uncertain durability without
+        // a path-based rollback that could remove a replaced or valid file.
+        sync_export_parent(&parent_handle).map_err(|_| anyhow::anyhow!(
+            "Password file was written, but its folder could not be synced; durability is uncertain. Verify the existing file before relying on it"
+        ))?;
         Ok(())
     }
     pub fn request(self: &Arc<Self>, request: Request) -> Result<Value> {
@@ -308,6 +329,10 @@ impl App {
         ensure!(
             !self.closing.load(Ordering::Acquire),
             "app is shutting down"
+        );
+        ensure!(
+            !state.persistence_failed,
+            "Could not durably save application data; restart the app before continuing"
         );
         ensure!(
             !state.password_export,
@@ -341,11 +366,20 @@ impl App {
                     .revision
                     .checked_add(1)
                     .context("configuration revision overflow")?;
-                config::write(
+                if config::write(
                     &self.directory.join("config.json"),
                     &serde_json::to_vec(&config)?,
                     true,
-                )?;
+                )
+                .is_err()
+                {
+                    // Rename may already have committed. Keep memory unchanged,
+                    // but never run it again until startup reloads durable data.
+                    Self::persistence_failed(&mut state);
+                    bail!(
+                        "Could not durably save configuration; restart the app before continuing"
+                    );
+                }
                 state.config = config;
                 state.previews.clear();
                 if changed_path {
@@ -390,14 +424,21 @@ impl App {
                     destinations: vec![],
                     result: None,
                 });
+                let previous_attempts = state.attempts.clone();
                 if kind == "backup"
                     && let Some(id) = profile_id
                 {
                     state.attempts.insert(id, now());
                 }
-                if let Err(e) = self.persist(&state) {
+                if self.persist(&state).is_err() {
                     state.active = None;
-                    return Err(e);
+                    state.attempts = previous_attempts;
+                    // A post-rename failure may leave a saved active job. On
+                    // restart it is conservatively reported as interrupted.
+                    Self::persistence_failed(&mut state);
+                    bail!(
+                        "Could not durably save job admission; restart the app before continuing"
+                    );
                 }
                 self.cancel.store(false, Ordering::Release);
                 let config = state.config.clone();
@@ -453,7 +494,9 @@ impl App {
             }
         }
         if self.persist(&state).is_err() {
-            state.setup_error = Some("Could not save job history and schedule attempts; fix data directory access before continuing".into());
+            // The job already ran: retain its result and completion attempt in
+            // memory, but do not admit more work after uncertain persistence.
+            Self::persistence_failed(&mut state);
         }
     }
     pub fn tick(self: &Arc<Self>) {
@@ -467,16 +510,7 @@ impl App {
             {
                 return;
             }
-            state
-                .config
-                .profiles
-                .iter()
-                .find(|p| {
-                    p.schedule_minutes > 0
-                        && now().saturating_sub(*state.attempts.get(&p.id).unwrap_or(&0))
-                            >= p.schedule_minutes * 60
-                })
-                .map(|p| p.id.clone())
+            due_profile(&state, now())
         };
         if let Some(profile_id) = due {
             let _ = self.request(Request::Backup { profile_id });
@@ -814,7 +848,16 @@ impl App {
             "--keep-monthly",
             &policy.keep_monthly.to_string(),
         ]);
-        let result = self.query(c, &repo, &args)?;
+        let output = self.run(c, &repo, &args)?;
+        restic::successful(&output)?;
+        // Restic 0.18 emits no JSON for forget when no snapshot group matches.
+        // Accept that successful no-op only here, not for other JSON queries.
+        let result: Value = if output.bytes.is_empty() {
+            json!([])
+        } else {
+            serde_json::from_slice(&output.bytes)
+                .map_err(|_| anyhow::anyhow!("unexpected restic retention response"))?
+        };
         let mut remove = vec![];
         let mut survivors = vec![];
         for group in result.as_array().context("unexpected retention preview")? {
@@ -836,7 +879,11 @@ impl App {
         );
         let token = id();
         let keep_count = survivors.len();
-        self.state.lock().unwrap().previews.insert(
+        let mut state = self.state.lock().unwrap();
+        // One bounded result, not an unbounded number of large five-minute
+        // previews. Only a successful replacement supersedes the previous one.
+        state.previews.clear();
+        state.previews.insert(
             token.clone(),
             Preview {
                 expires: now() + 300,
@@ -861,7 +908,7 @@ impl App {
             .unwrap()
             .previews
             .remove(token)
-            .context("preview token missing or already used")?;
+            .context("preview token missing, superseded or already used")?;
         ensure!(
             preview.expires > now() && preview.revision == c.revision,
             "preview expired or configuration changed"
@@ -988,6 +1035,27 @@ impl App {
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|s| (*s).to_owned()).collect()
 }
+fn due_profile(state: &State, now: u64) -> Option<String> {
+    state
+        .config
+        .profiles
+        .iter()
+        .filter(|p| p.schedule_minutes > 0)
+        .map(|p| {
+            (
+                p,
+                state
+                    .attempts
+                    .get(&p.id)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(p.schedule_minutes.saturating_mul(60)),
+            )
+        })
+        .filter(|(_, deadline)| *deadline <= now)
+        .min_by_key(|(_, deadline)| *deadline)
+        .map(|(p, _)| p.id.clone())
+}
 fn password_export_target(c: &Config, data: &Path, target: &Path) -> Result<PathBuf> {
     fn validate(c: &Config, data: &Path, target: &Path) -> Result<PathBuf> {
         config::absolute(target.to_str().context("invalid path")?)?;
@@ -1016,6 +1084,69 @@ fn password_export_target(c: &Config, data: &Path, target: &Path) -> Result<Path
         Ok(target)
     }
     validate(c, data, target).map_err(|_| anyhow::anyhow!("Choose a new password file in an existing private folder outside app data, repositories, and backup sources; existing files and symlinks are never overwritten"))
+}
+fn sync_export_parent(parent: &File) -> Result<()> {
+    #[cfg(test)]
+    config::write_fault("export_directory_sync")?;
+    parent.sync_all()?;
+    Ok(())
+}
+#[cfg(target_os = "linux")]
+fn password_export_parent(target: &Path) -> Result<File> {
+    use std::{
+        ffi::CString,
+        os::{
+            fd::{AsRawFd, FromRawFd},
+            unix::{ffi::OsStrExt, fs::MetadataExt},
+        },
+    };
+    let mut parent = File::open("/")?;
+    for component in target
+        .parent()
+        .context("missing parent")?
+        .components()
+        .skip(1)
+    {
+        ensure!(
+            matches!(component, std::path::Component::Normal(_)),
+            "invalid parent component"
+        );
+        let name = CString::new(component.as_os_str().as_bytes())?;
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        ensure!(fd >= 0, "parent must exist without symlinks");
+        parent = unsafe { File::from_raw_fd(fd) };
+    }
+    let metadata = parent.metadata()?;
+    let trusted_owner = metadata.uid() == 0 || metadata.uid() == unsafe { libc::geteuid() };
+    // As with restore, sticky shared directories protect our owned staging
+    // entry. Same-user processes and root are within the trust boundary.
+    ensure!(
+        trusted_owner && (metadata.mode() & 0o022 == 0 || metadata.mode() & 0o1000 != 0),
+        "untrusted password export parent"
+    );
+    Ok(parent)
+}
+#[cfg(target_os = "linux")]
+fn pinned_export_target(parent: &File, target: &Path) -> Result<PathBuf> {
+    use std::os::fd::AsRawFd;
+    Ok(
+        PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd()))
+            .join(target.file_name().context("missing file name")?),
+    )
+}
+#[cfg(not(target_os = "linux"))]
+fn password_export_parent(_: &Path) -> Result<File> {
+    bail!("safe descriptor-based password export currently requires Linux")
+}
+#[cfg(not(target_os = "linux"))]
+fn pinned_export_target(_: &File, _: &Path) -> Result<PathBuf> {
+    bail!("safe descriptor-based password export currently requires Linux")
 }
 fn repository_config_id(value: &Value) -> Result<String> {
     let id = value["id"]

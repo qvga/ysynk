@@ -45,7 +45,7 @@ sha256sum --check SHA256SUMS
 ```
 
 macOS and Windows builds are not provided. Their native keychain adapters have
-not been validated. Safe restore currently requires Linux.
+not been validated. Safe restore and password export currently require Linux.
 
 ## Use
 

@@ -98,6 +98,454 @@ fn check(repo: &Repository) -> Request {
 }
 
 #[test]
+fn audit_save_rejects_ambiguous_credentials_without_exposing_them() -> Result<()> {
+    for location in [
+        "rest:https://alice:SENTINEL@host/repo",
+        "rest:https://alice@example.com:SENTINEL@host/repo",
+        "sftp:alice:SENTINEL@host:/repo",
+        "sftp://alice@example.com:SENTINEL@host/repo",
+    ] {
+        let dir = tempfile::tempdir()?;
+        let store = Arc::new(FakeStore::default());
+        let app = open(
+            dir.path().join("app"),
+            store.clone(),
+            dir.path().join("locks"),
+            &Config::default(),
+        )?;
+        let mut c = Config::default();
+        c.repositories.push(Repository {
+            id: "new".into(),
+            label: "Fixture".into(),
+            location: location.into(),
+        });
+        let result = app.request(Request::SaveConfig { config: c });
+        assert!(result.is_err(), "accepted ambiguous userinfo");
+        assert!(!result.unwrap_err().to_string().contains("SENTINEL"));
+        assert!(
+            !app.request(Request::Status)?
+                .to_string()
+                .contains("SENTINEL")
+        );
+        assert!(!fs::read_to_string(app.directory.join("config.json"))?.contains("SENTINEL"));
+        assert!(!fs::read_to_string(app.directory.join("state.json"))?.contains("SENTINEL"));
+        assert_eq!(store.state.lock().unwrap().reads, 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn audit_save_preserves_username_ipv6_and_path_separators() -> Result<()> {
+    for location in [
+        "rest:https://alice@host/repo@archive",
+        "rest:https://alice@example.com@host/repo@archive",
+        "rest:https://alice@[::1]:8000/repo@archive",
+        "rest:https://[::1]:8000/repo@archive",
+        "sftp:alice@host:/repo@archive",
+        "sftp:alice@[::1]:/repo@archive",
+        "sftp:[::1]:/repo@archive",
+        "sftp://alice@[::1]:22/repo@archive",
+        "sftp://[::1]:22/repo@archive",
+    ] {
+        let dir = tempfile::tempdir()?;
+        let store = Arc::new(FakeStore::default());
+        let app = open(
+            dir.path().join("app"),
+            store.clone(),
+            dir.path().join("locks"),
+            &Config::default(),
+        )?;
+        let c = Config {
+            repositories: vec![Repository {
+                id: "valid".into(),
+                label: "Fixture".into(),
+                location: location.into(),
+            }],
+            ..Config::default()
+        };
+        app.request(Request::SaveConfig { config: c })?;
+        assert_eq!(
+            app.request(Request::Status)?["config"]["repositories"][0]["location"],
+            location
+        );
+        assert_eq!(store.state.lock().unwrap().reads, 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn audit_scheduler_selects_oldest_deadline_after_each_completion() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let app = open(
+        dir.path().join("app"),
+        Arc::new(FakeStore::default()),
+        dir.path().join("locks"),
+        &Config::default(),
+    )?;
+    let mut state = app.state.lock().unwrap();
+    state.config.profiles = [("first", 1), ("second", 3), ("third", 2)]
+        .into_iter()
+        .map(|(id, schedule_minutes)| Profile {
+            id: id.into(),
+            label: id.into(),
+            sources: vec![],
+            excludes: vec![],
+            repository_ids: vec![],
+            schedule_minutes,
+            retention: Retention {
+                keep_last: 1,
+                keep_daily: 0,
+                keep_weekly: 0,
+                keep_monthly: 0,
+            },
+        })
+        .collect();
+    // Deadlines are 960, 880, and 920, in a different order from config.
+    state.attempts = [
+        ("first".into(), 900),
+        ("second".into(), 700),
+        ("third".into(), 800),
+    ]
+    .into();
+    for (clock, expected, completed) in [
+        (1000, "second", 1100),
+        (1100, "third", 1200),
+        (1200, "first", 1300),
+        (1300, "second", 1400),
+    ] {
+        assert_eq!(due_profile(&state, clock).as_deref(), Some(expected));
+        state.attempts.insert(expected.into(), completed);
+    }
+    state.attempts.values_mut().for_each(|t| *t = u64::MAX);
+    assert_eq!(due_profile(&state, u64::MAX - 1), None);
+    Ok(())
+}
+
+#[test]
+fn existing_sftp_locators_keep_their_exact_keychain_binding_on_load_and_save() -> Result<()> {
+    for location in [
+        "sftp:alice@host:repo@archive",
+        "sftp:alice@example.com@host:/repo",
+        "sftp:alice@host:repo@archive:old",
+        "sftp:alice@host:/repo@archive",
+        "rest:https://alice@example.com@host/repo",
+    ] {
+        let directory = tempfile::tempdir()?;
+        let store = Arc::new(FakeStore::default());
+        let repo = Repository {
+            location: location.into(),
+            ..repository(directory.path())
+        };
+        let record = credentials::Record::generate(&repo);
+        store
+            .state
+            .lock()
+            .unwrap()
+            .entries
+            .insert(repo.id.clone(), record.bytes()?.to_vec());
+        let configuration = Config {
+            repositories: vec![repo.clone()],
+            ..Config::default()
+        };
+        // The file represents an existing installation. Loading it must not
+        // require rewriting the exact locator stored in its keychain record.
+        let app = open(
+            directory.path().join("app"),
+            store.clone(),
+            directory.path().join("locks"),
+            &configuration,
+        )?;
+        let loaded = credentials::required(
+            store.as_ref(),
+            &app.state.lock().unwrap().config.repositories[0],
+        )?;
+        assert!(loaded.password == record.password);
+        let status = app.request(Request::SaveConfig {
+            config: configuration,
+        })?;
+        assert_eq!(status["config"]["repositories"][0]["location"], location);
+        assert_eq!(store.state.lock().unwrap().writes, 0);
+        app.shutdown();
+    }
+    Ok(())
+}
+
+#[test]
+fn audit_write_failures_block_admission_and_clear_previews() -> Result<()> {
+    for stage in ["publish", "directory_sync"] {
+        let dir = tempfile::tempdir()?;
+        let store = Arc::new(FakeStore::default());
+        let app = open(
+            dir.path().join("app"),
+            store.clone(),
+            dir.path().join("locks"),
+            &Config::default(),
+        )?;
+        app.state.lock().unwrap().setup_error = None;
+        app.state.lock().unwrap().previews.insert(
+            "stale".into(),
+            Preview {
+                expires: u64::MAX,
+                revision: 0,
+                repository: repository(dir.path()),
+                profile_id: "profile".into(),
+                repository_identity: "a".repeat(64),
+                remove: vec![],
+                survivors: vec![],
+            },
+        );
+        let c = Config {
+            restic_path: "/new/restic".into(),
+            ..Config::default()
+        };
+        config::WRITE_FAILURE.with(|fault| fault.set(Some(stage)));
+        assert!(app.request(Request::SaveConfig { config: c }).is_err());
+        let status = app.request(Request::Status)?;
+        assert!(
+            status["setup_error"]
+                .as_str()
+                .is_some_and(|s| s.contains("restart"))
+        );
+        assert!(app.state.lock().unwrap().previews.is_empty());
+        assert!(
+            app.request(Request::Backup {
+                profile_id: "missing".into()
+            })
+            .is_err()
+        );
+        assert_eq!(store.state.lock().unwrap().reads, 0);
+        assert_eq!(app.state.lock().unwrap().config.revision, 0);
+        let disk: Config = serde_json::from_slice(&fs::read(app.directory.join("config.json"))?)?;
+        assert_eq!(disk.revision, u64::from(stage == "directory_sync"));
+        assert!(
+            app.request(Request::SaveConfig {
+                config: Config::default()
+            })
+            .is_err()
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn audit_failed_admission_preserves_attempts_and_blocks_retry() -> Result<()> {
+    for stage in ["publish", "directory_sync"] {
+        let dir = tempfile::tempdir()?;
+        let store = Arc::new(FakeStore::default());
+        let repo = repository(dir.path());
+        let c = Config {
+            repositories: vec![repo.clone()],
+            profiles: vec![Profile {
+                id: "profile".into(),
+                label: "Fixture".into(),
+                sources: vec![dir.path().join("source").to_str().unwrap().into()],
+                excludes: vec![],
+                repository_ids: vec![repo.id],
+                schedule_minutes: 1,
+                retention: Retention {
+                    keep_last: 1,
+                    keep_daily: 0,
+                    keep_weekly: 0,
+                    keep_monthly: 0,
+                },
+            }],
+            ..Config::default()
+        };
+        let app = open(
+            dir.path().join("app"),
+            store.clone(),
+            dir.path().join("locks"),
+            &c,
+        )?;
+        {
+            let mut state = app.state.lock().unwrap();
+            state.setup_error = None;
+            state.attempts.insert("profile".into(), 17);
+        }
+        config::WRITE_FAILURE.with(|fault| fault.set(Some(stage)));
+        assert!(
+            app.request(Request::Backup {
+                profile_id: "profile".into()
+            })
+            .is_err()
+        );
+        {
+            let state = app.state.lock().unwrap();
+            assert_eq!(state.attempts["profile"], 17);
+            assert!(state.active.is_none());
+            assert!(
+                state
+                    .setup_error
+                    .as_ref()
+                    .is_some_and(|s| s.contains("restart"))
+            );
+        }
+        let disk: Persisted = serde_json::from_slice(&fs::read(app.directory.join("state.json"))?)?;
+        // A failed directory sync may have committed admission. Do not undo
+        // publication by pathname; startup treats that saved job as interrupted.
+        assert_eq!(disk.active.is_some(), stage == "directory_sync");
+        if stage == "directory_sync" {
+            assert_ne!(disk.attempts["profile"], 17);
+        }
+        app.tick();
+        assert!(
+            app.request(Request::Backup {
+                profile_id: "profile".into()
+            })
+            .is_err()
+        );
+        assert!(app.workers.lock().unwrap().is_empty());
+        assert_eq!(store.state.lock().unwrap().reads, 0);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn audit_export_rejects_untrusted_parent_before_reading_credentials() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir()?;
+    let store = Arc::new(FakeStore::default());
+    let repo = repository(dir.path());
+    let c = Config {
+        repositories: vec![repo.clone()],
+        ..Config::default()
+    };
+    let app = open(
+        dir.path().join("app"),
+        store.clone(),
+        dir.path().join("locks"),
+        &c,
+    )?;
+    store.state.lock().unwrap().entries.insert(
+        repo.id.clone(),
+        credentials::Record::generate(&repo).bytes()?.to_vec(),
+    );
+    let parent = dir.path().join("shared");
+    fs::create_dir(&parent)?;
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o777))?;
+    assert!(
+        app.export_repository_password(&repo.id, 0, parent.join("SENTINEL"))
+            .is_err()
+    );
+    assert_eq!(store.state.lock().unwrap().reads, 0);
+    assert_eq!(fs::read_dir(parent)?.count(), 0);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn audit_export_pins_parent_across_ancestor_rename_and_symlink_replacement() -> Result<()> {
+    use std::os::unix::{fs::PermissionsExt, fs::symlink};
+    let dir = tempfile::tempdir()?;
+    let store = Arc::new(FakeStore::default());
+    let repo = repository(dir.path());
+    let c = Config {
+        repositories: vec![repo.clone()],
+        ..Config::default()
+    };
+    let app = open(
+        dir.path().join("app"),
+        store.clone(),
+        dir.path().join("locks"),
+        &c,
+    )?;
+    let record = credentials::Record::generate(&repo);
+    let expected = format!("{}\n", record.password);
+    store
+        .state
+        .lock()
+        .unwrap()
+        .entries
+        .insert(repo.id.clone(), record.bytes()?.to_vec());
+    let ancestor = dir.path().join("ancestor");
+    fs::create_dir_all(ancestor.join("private"))?;
+    fs::set_permissions(ancestor.join("private"), fs::Permissions::from_mode(0o700))?;
+    let alternate = dir.path().join("alternate");
+    fs::create_dir(&alternate)?;
+    symlink(&alternate, dir.path().join("link"))?;
+    let error = app
+        .export_repository_password(&repo.id, 0, dir.path().join("link/SENTINEL"))
+        .unwrap_err()
+        .to_string();
+    assert!(!error.contains("SENTINEL"));
+    assert_eq!(store.state.lock().unwrap().reads, 0);
+    let entered = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    *store.pause.lock().unwrap() = Some((entered.clone(), resume.clone()));
+    let task_app = app.clone();
+    let target = ancestor.join("private/password");
+    let task = thread::spawn(move || task_app.export_repository_password(&repo.id, 0, target));
+    entered.wait();
+    let moved = dir.path().join("moved");
+    fs::rename(&ancestor, &moved)?;
+    fs::create_dir(alternate.join("private"))?;
+    symlink(&alternate, &ancestor)?;
+    resume.wait();
+    task.join().unwrap()?;
+    assert_eq!(
+        fs::read(moved.join("private/password"))?,
+        expected.as_bytes()
+    );
+    assert_eq!(
+        fs::metadata(moved.join("private/password"))?
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert_eq!(fs::read_dir(moved.join("private"))?.count(), 1);
+    assert_eq!(fs::read_dir(alternate.join("private"))?.count(), 0);
+    assert!(
+        !app.request(Request::Status)?
+            .to_string()
+            .contains(expected.trim())
+    );
+    Ok(())
+}
+
+#[test]
+fn audit_completion_write_failure_preserves_outcome_and_blocks_jobs() -> Result<()> {
+    for stage in ["publish", "directory_sync"] {
+        let dir = tempfile::tempdir()?;
+        let store = Arc::new(FakeStore::default());
+        let app = open(
+            dir.path().join("app"),
+            store.clone(),
+            dir.path().join("locks"),
+            &Config::default(),
+        )?;
+        {
+            let mut state = app.state.lock().unwrap();
+            state.setup_error = None;
+            state.active = Some(serde_json::from_value(json!({
+                "id":"job", "kind":"backup", "label":"backup", "state":"running", "started_at":1,
+                "profile_id":"profile", "message":"Running", "destinations":[]
+            }))?);
+        }
+        config::WRITE_FAILURE.with(|fault| fault.set(Some(stage)));
+        app.complete(Ok(json!({"completed":true})));
+        let state = app.state.lock().unwrap();
+        assert!(state.active.is_none());
+        assert_eq!(state.history[0].state, "success");
+        assert!(state.attempts["profile"] > 0);
+        assert!(state.persistence_failed);
+        assert!(state.setup_error.as_ref().unwrap().contains("restart"));
+        drop(state);
+        app.tick();
+        assert!(
+            app.request(Request::Backup {
+                profile_id: "profile".into()
+            })
+            .is_err()
+        );
+        assert!(app.workers.lock().unwrap().is_empty());
+        assert_eq!(store.state.lock().unwrap().reads, 0);
+    }
+    Ok(())
+}
+
+#[test]
 fn password_export_writes_only_a_new_private_file_and_reserves_admission() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let store = Arc::new(FakeStore::default());
@@ -106,6 +554,11 @@ fn password_export_writes_only_a_new_private_file_and_reserves_admission() -> Re
     let recovery = dir.path().join("private-recovery");
     fs::create_dir(&source)?;
     fs::create_dir(&recovery)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&recovery, fs::Permissions::from_mode(0o700))?;
+    }
     fs::create_dir(&repo.location)?;
     let c = Config {
         repositories: vec![repo.clone()],
@@ -315,6 +768,192 @@ fn password_export_writes_only_a_new_private_file_and_reserves_admission() -> Re
     for name in ["config.json", "state.json"] {
         assert!(!fs::read_to_string(app.directory.join(name))?.contains(password));
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn export_sync_failure_preserves_the_published_file_and_releases_admission() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir()?;
+    fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))?;
+    let store = Arc::new(FakeStore::default());
+    let repo = repository(directory.path());
+    let configuration = Config {
+        repositories: vec![repo.clone()],
+        ..Config::default()
+    };
+    let app = open(
+        directory.path().join("app"),
+        store.clone(),
+        directory.path().join("locks"),
+        &configuration,
+    )?;
+    let record = credentials::Record::generate(&repo);
+    store
+        .state
+        .lock()
+        .unwrap()
+        .entries
+        .insert(repo.id.clone(), record.bytes()?.to_vec());
+    let target = directory.path().join("password");
+    config::WRITE_FAILURE.with(|fault| fault.set(Some("export_directory_sync")));
+    let result = app.export_repository_password(&repo.id, 0, target.clone());
+    assert!(result.is_err());
+    let error = result.unwrap_err().to_string();
+    assert!(error.contains("durability"), "{error}");
+    assert_eq!(
+        fs::read(&target)?,
+        format!("{}\n", record.password).as_bytes()
+    );
+    assert_eq!(fs::metadata(&target)?.permissions().mode() & 0o777, 0o600);
+    assert!(!app.is_busy());
+    assert!(!app.state.lock().unwrap().password_export);
+    assert!(
+        app.export_repository_password(&repo.id, 0, target.clone())
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(target)?,
+        format!("{}\n", record.password).as_bytes()
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn only_the_latest_successful_retention_preview_remains_valid() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Arc::new(FakeStore::default());
+    fs::create_dir(directory.path().join("source"))?;
+    fs::write(
+        directory.path().join("source/document"),
+        b"Disposable fixture",
+    )?;
+    let repositories: Vec<_> = ["first", "second"]
+        .into_iter()
+        .map(|name| Repository {
+            id: name.into(),
+            label: name.into(),
+            location: directory.path().join(name).to_str().unwrap().into(),
+        })
+        .collect();
+    let configuration = Config {
+        repositories: repositories.clone(),
+        profiles: vec![Profile {
+            id: "profile".into(),
+            label: "Fixture".into(),
+            sources: vec![directory.path().join("source").to_str().unwrap().into()],
+            excludes: vec![],
+            repository_ids: repositories.iter().map(|repo| repo.id.clone()).collect(),
+            schedule_minutes: 0,
+            retention: Retention {
+                keep_last: 1,
+                keep_daily: 0,
+                keep_weekly: 0,
+                keep_monthly: 0,
+            },
+        }],
+        ..Config::default()
+    };
+    let app = open(
+        directory.path().join("app"),
+        store.clone(),
+        directory.path().join("locks"),
+        &configuration,
+    )?;
+    for repo in &repositories {
+        success(&app, initialize(repo))?;
+    }
+    success(
+        &app,
+        Request::Backup {
+            profile_id: "profile".into(),
+        },
+    )?;
+    let preview = |repository_id: &str| Request::RetentionPreview {
+        repository_id: repository_id.into(),
+        profile_id: "profile".into(),
+    };
+    let mut tokens = vec![];
+    // Replacement is global, even when a different repository is selected.
+    for repository_id in ["first", "first", "second"] {
+        let result = success(&app, preview(repository_id))?.result.unwrap();
+        let token = result["token"].as_str().unwrap().to_owned();
+        let state = app.state.lock().unwrap();
+        assert_eq!(state.previews.len(), 1);
+        assert!(state.previews.contains_key(&token));
+        tokens.push(token);
+    }
+    // Failure must not invalidate an already completed, valid preview.
+    store.state.lock().unwrap().read_error = Some(credentials::LOCKED);
+    assert_eq!(finish(&app, preview("first"))?.state, "failed");
+    store.state.lock().unwrap().read_error = None;
+    assert!(app.state.lock().unwrap().previews.contains_key(&tokens[2]));
+    let stale = finish(
+        &app,
+        Request::ApplyRetention {
+            token: tokens[0].clone(),
+            confirmation: "DELETE".into(),
+        },
+    )?;
+    assert_eq!(stale.state, "failed");
+    assert!(stale.message.contains("superseded"));
+    success(
+        &app,
+        Request::ApplyRetention {
+            token: tokens[2].clone(),
+            confirmation: "DELETE".into(),
+        },
+    )?;
+    assert!(app.state.lock().unwrap().previews.is_empty());
+    app.shutdown();
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn retention_preview_of_an_empty_repository_has_no_candidates() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let store = Arc::new(FakeStore::default());
+    let repo = repository(directory.path());
+    let configuration = Config {
+        repositories: vec![repo.clone()],
+        profiles: vec![Profile {
+            id: "profile".into(),
+            label: "Fixture".into(),
+            sources: vec![directory.path().join("source").to_str().unwrap().into()],
+            excludes: vec![],
+            repository_ids: vec![repo.id.clone()],
+            schedule_minutes: 0,
+            retention: Retention {
+                keep_last: 1,
+                keep_daily: 0,
+                keep_weekly: 0,
+                keep_monthly: 0,
+            },
+        }],
+        ..Config::default()
+    };
+    let app = open(
+        directory.path().join("app"),
+        store,
+        directory.path().join("locks"),
+        &configuration,
+    )?;
+    success(&app, initialize(&repo))?;
+    let preview = success(
+        &app,
+        Request::RetentionPreview {
+            repository_id: repo.id,
+            profile_id: "profile".into(),
+        },
+    )?
+    .result
+    .unwrap();
+    assert_eq!(preview["remove"], json!([]));
+    assert_eq!(preview["keep_count"], 0);
+    app.shutdown();
     Ok(())
 }
 

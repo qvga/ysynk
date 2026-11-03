@@ -8,6 +8,20 @@ use std::{
 };
 
 pub(crate) const LIMIT: usize = 8 * 1024 * 1024;
+#[cfg(test)]
+thread_local! {
+    pub(crate) static WRITE_FAILURE: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(test)]
+pub(crate) fn write_fault(stage: &str) -> Result<()> {
+    WRITE_FAILURE.with(|fault| {
+        if fault.get() == Some(stage) {
+            fault.set(None);
+            anyhow::bail!("injected write failure");
+        }
+        Ok(())
+    })
+}
 pub(crate) fn read(path: &Path) -> Result<Vec<u8>> {
     let mut options = fs::OpenOptions::new();
     options.read(true);
@@ -32,11 +46,15 @@ pub(crate) fn write(path: &Path, bytes: &[u8], replace: bool) -> Result<()> {
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
     file.write_all(bytes)?;
     file.as_file().sync_all()?;
+    #[cfg(test)]
+    write_fault("publish")?;
     if replace {
         file.persist(path).map_err(|e| e.error)?;
     } else {
         file.persist_noclobber(path).map_err(|e| e.error)?;
     }
+    #[cfg(test)]
+    write_fault("directory_sync")?;
     fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
@@ -103,18 +121,23 @@ pub(crate) fn validate_shape(c: &Config) -> Result<()> {
         );
         if let Some((_, tail)) = r.location.split_once("://") {
             let authority = tail.split('/').next().unwrap_or("");
-            if let Some((userinfo, _)) = authority.split_once('@') {
+            if let Some((userinfo, _)) = authority.rsplit_once('@') {
                 ensure!(
-                    !userinfo.contains(':') && !userinfo.contains('%'),
+                    !userinfo.contains([':', '%']),
                     "embedded URL credentials are not allowed"
                 );
             }
         }
         if let Some(tail) = r.location.strip_prefix("sftp:")
-            && let Some((userinfo, _)) = tail.split_once('@')
+            && !tail.starts_with("//")
+            && let Some((userinfo, _)) = tail.split('/').next().unwrap_or("").split_once('@')
         {
+            // SCP syntax has no password field: the first colon starts its
+            // path, and restic also supports email-like usernames. Preserve
+            // the legacy first-@ restriction rather than treating path text
+            // after the host as URL credentials. Do not rewrite bound locators.
             ensure!(
-                !userinfo.contains(':') && !userinfo.contains('%'),
+                !userinfo.contains([':', '%']),
                 "embedded SFTP credentials are not allowed"
             );
         }

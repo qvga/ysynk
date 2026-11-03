@@ -66,6 +66,69 @@ fn signal(pid: u32, signal: i32) {
         libc::kill(-(pid as i32), signal);
     }
 }
+
+// Only the parent's ends are nonblocking. The subprocess retains ordinary
+// blocking pipes. A detached descendant cannot keep our I/O workers alive
+// after cancellation or the bounded post-exit drain period.
+#[cfg(unix)]
+struct InterruptiblePipe<T> {
+    pipe: T,
+    stop: Arc<AtomicBool>,
+}
+#[cfg(unix)]
+impl<T> InterruptiblePipe<T> {
+    fn retry<R>(
+        &mut self,
+        mut operation: impl FnMut(&mut T) -> std::io::Result<R>,
+    ) -> std::io::Result<R> {
+        loop {
+            if self.stop.load(Ordering::Acquire) {
+                // Interrupted would be retried indefinitely by write_all/read
+                // helpers. BrokenPipe terminates both kinds of worker instead.
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            match operation(&mut self.pipe) {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                result => return result,
+            }
+        }
+    }
+}
+#[cfg(unix)]
+impl<T: Read> Read for InterruptiblePipe<T> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.retry(|pipe| pipe.read(buffer))
+    }
+}
+#[cfg(unix)]
+impl<T: Write> Write for InterruptiblePipe<T> {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.retry(|pipe| pipe.write(buffer))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.retry(Write::flush)
+    }
+}
+#[cfg(unix)]
+fn nonblocking_pipes(child: &std::process::Child) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let descriptors = [
+        child.stdout.as_ref().map(AsRawFd::as_raw_fd),
+        child.stderr.as_ref().map(AsRawFd::as_raw_fd),
+        child.stdin.as_ref().map(AsRawFd::as_raw_fd),
+    ];
+    for fd in descriptors.into_iter().flatten() {
+        // These descriptors remain owned by child throughout setup.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
 fn reader(
     mut pipe: impl Read + Send + 'static,
     overflow: Arc<AtomicBool>,
@@ -177,17 +240,44 @@ fn run_inner(
         anyhow::anyhow!("could not start executable; check installed path and permissions")
     })?;
     let pid = child.id();
+    #[cfg(unix)]
+    if nonblocking_pipes(&child).is_err() {
+        signal(pid, libc::SIGKILL);
+        let _ = child.kill();
+        let _ = child.wait();
+        anyhow::bail!("could not configure cancellable subprocess pipes");
+    }
+    #[cfg(unix)]
+    let pipe_stop = Arc::new(AtomicBool::new(false));
     let overflow = Arc::new(AtomicBool::new(false));
     let (sender, updates) = mpsc::sync_channel(8);
-    let stdout = if progress.is_some() {
-        backup_reader(child.stdout.take().unwrap(), overflow.clone(), sender)
-    } else {
-        reader(child.stdout.take().unwrap(), overflow.clone(), true)
+    let stdout_pipe = child.stdout.take().unwrap();
+    let stderr_pipe = child.stderr.take().unwrap();
+    #[cfg(unix)]
+    let stdout_pipe = InterruptiblePipe {
+        pipe: stdout_pipe,
+        stop: pipe_stop.clone(),
     };
-    let stderr = reader(child.stderr.take().unwrap(), overflow.clone(), false);
+    #[cfg(unix)]
+    let stderr_pipe = InterruptiblePipe {
+        pipe: stderr_pipe,
+        stop: pipe_stop.clone(),
+    };
+    let stdout = if progress.is_some() {
+        backup_reader(stdout_pipe, overflow.clone(), sender)
+    } else {
+        reader(stdout_pipe, overflow.clone(), true)
+    };
+    let stderr = reader(stderr_pipe, overflow.clone(), false);
     // Write independently so cancellation remains responsive.
     let writer = input.map(|input| {
-        let mut pipe = child.stdin.take().unwrap();
+        let pipe = child.stdin.take().unwrap();
+        #[cfg(unix)]
+        let pipe = InterruptiblePipe {
+            pipe,
+            stop: pipe_stop.clone(),
+        };
+        let mut pipe = pipe;
         thread::spawn(move || pipe.write_all(&input))
     });
     let start = Instant::now();
@@ -230,6 +320,33 @@ fn run_inner(
     // Reap pipe-holding descendants too (for example transport subprocesses).
     #[cfg(unix)]
     signal(pid, libc::SIGKILL);
+    #[cfg(unix)]
+    let pipes_stalled = {
+        let drain_started = Instant::now();
+        let mut stalled = false;
+        while !stdout.is_finished()
+            || !stderr.is_finished()
+            || writer.as_ref().is_some_and(|writer| !writer.is_finished())
+        {
+            if let Some(callback) = progress.as_mut() {
+                for update in updates.try_iter().take(8) {
+                    callback(update);
+                }
+            }
+            timed_out |= timeout.is_some_and(|timeout| start.elapsed() >= timeout);
+            if cancel.load(Ordering::Acquire)
+                || overflow.load(Ordering::Acquire)
+                || timed_out
+                || drain_started.elapsed() >= Duration::from_secs(1)
+            {
+                stalled = true;
+                pipe_stop.store(true, Ordering::Release);
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        stalled
+    };
     let out = stdout.join();
     let _ = stderr.join();
     if let Some(writer) = writer {
@@ -240,15 +357,20 @@ fn run_inner(
             callback(update);
         }
     }
-    let out = out
-        .map_err(|_| anyhow::anyhow!("output reader failed"))?
-        .map_err(|_| anyhow::anyhow!("could not read bounded subprocess output"))?;
     ensure!(!cancel.load(Ordering::Acquire), "operation cancelled");
     ensure!(
         !overflow.load(Ordering::Acquire),
         "command output exceeds its size limit (queries: 8 MiB, backup records: 64 KiB); narrow the query"
     );
     ensure!(!timed_out, "executable version probe timed out");
+    #[cfg(unix)]
+    ensure!(
+        !pipes_stalled,
+        "subprocess pipes remained open after executable exit; operation was not completed"
+    );
+    let out = out
+        .map_err(|_| anyhow::anyhow!("output reader failed"))?
+        .map_err(|_| anyhow::anyhow!("could not read bounded subprocess output"))?;
     let status = status?;
     Ok(Output {
         code: status.code().unwrap_or(130),
@@ -295,3 +417,7 @@ pub(crate) fn version(executable: &str) -> Result<String> {
     );
     Ok(format!("restic {v}"))
 }
+
+#[cfg(all(test, unix))]
+#[path = "restic_tests.rs"]
+mod tests;

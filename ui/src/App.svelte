@@ -1,0 +1,114 @@
+<script lang="ts">
+  import { onMount } from 'svelte';
+  import { request, inDesktop } from './lib/client';
+  import type { Config, Job, Request, Status } from './lib/types';
+  import Icon from './lib/Icon.svelte';
+  import Activity from './lib/Activity.svelte';
+  import Profiles from './lib/Profiles.svelte';
+  import Repositories from './lib/Repositories.svelte';
+  import Snapshots from './lib/Snapshots.svelte';
+  import Preferences from './lib/Preferences.svelte';
+
+  const pages = ['Profiles', 'Repositories', 'Snapshots', 'Settings'] as const;
+  type Page = typeof pages[number];
+  let page = $state<Page>('Profiles');
+  let status = $state<Status | null>(null);
+  let connection = $state('');
+  let error = $state('');
+  let notice = $state('');
+  let sending = $state(false);
+  let waiting = $state(false);
+  let theme = $state('system');
+  let hideToTray = $state(false);
+  let polling = $state(false);
+  let generation = 0;
+  let alive = true;
+  const pending = new Map<string, { resolve: (job: Job) => void; reject: (error: Error) => void }>();
+  let busy = $derived(sending || waiting || !!status?.active || !!connection);
+  let ready = $derived(!!status && !status.setup_error && !!status.restic_version);
+  let config = $derived(status?.config);
+  function accept(next: Status) {
+    if (!alive) return;
+    status = next; connection = '';
+    for (const job of next.history) {
+      const waiter = pending.get(job.id);
+      if (waiter && job.state !== 'running') { pending.delete(job.id); waiter.resolve(job); }
+    }
+    waiting = pending.size > 0;
+  }
+  async function refresh() {
+    if (polling || !alive) return;
+    polling = true;
+    const stamp = generation;
+    try { const next = await request<Status>({ op: 'status' }); if (stamp === generation) accept(next); }
+    catch (cause) { if (alive && stamp === generation) connection = cause instanceof Error ? cause.message : 'The local engine is unavailable. Reopen ysynk and try again.'; }
+    finally { polling = false; }
+  }
+  async function run(operation: Request): Promise<Job> {
+    if (busy) throw new Error('Another operation is running or the engine is unavailable. Wait for it to finish, or cancel it in the activity bar.');
+    sending = true; error = ''; notice = '';
+    try {
+      const response = await request<{ job_id: string }>(operation);
+      if (!response.job_id) throw new Error('The engine did not return a job ID. Reconnect before trying again.');
+      const result = new Promise<Job>((resolve, reject) => pending.set(response.job_id, { resolve, reject }));
+      waiting = true;
+      // A quick query may finish before its admission response reaches the UI.
+      if (status) accept(status);
+      void refresh();
+      return await result;
+    } finally { sending = false; }
+  }
+  async function action(operation: Request) {
+    try {
+      const job = await run(operation);
+      if (job.state !== 'success') throw new Error(job.message || `Operation ${job.state}. Review activity for per-repository results.`);
+      notice = `${job.label || job.kind} completed.`;
+    } catch (cause) { error = cause instanceof Error ? cause.message : 'The operation failed. Review activity and try again.'; }
+  }
+  async function save(next: Config): Promise<string | null> {
+    if (busy) return 'Wait for the active operation before saving configuration.';
+    sending = true; error = ''; notice = '';
+    try {
+      const updated = await request<Status>({ op: 'save_config', config: next });
+      generation++; accept(updated); notice = 'Configuration saved.'; return null;
+    } catch (cause) { return cause instanceof Error ? cause.message : 'Configuration could not be saved. Reload and try again.'; }
+    finally { sending = false; }
+  }
+  async function cancel() {
+    try { await request<null>({ op: 'cancel' }); notice = 'Cancellation requested. Wait for the operation to stop.'; }
+    catch { error = 'Cancellation could not be sent. Reconnect and check activity.'; }
+  }
+  function setTheme(value: string) { theme = value; try { localStorage.setItem('ysynk-theme', value); } catch { /* Desktop preferences can be read-only. */ } }
+  onMount(() => {
+    try { const value = localStorage.getItem('ysynk-theme'); if (value && ['light', 'dark', 'system'].includes(value)) theme = value; } catch { /* Use the system theme. */ }
+    void refresh();
+    const timer = setInterval(() => { if (inDesktop()) void refresh(); }, 1000);
+    return () => { alive = false; clearInterval(timer); for (const waiter of pending.values()) waiter.reject(new Error('The interface closed before the operation completed.')); pending.clear(); };
+  });
+</script>
+
+<div class="app" data-theme={theme}>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <aside class="sidebar">
+    <div class="brand"><Icon name="shield" size={27}/><span>ysynk</span></div>
+    <nav aria-label="Main navigation">{#each pages as item}<button aria-label={item} aria-current={page === item ? 'page' : undefined} class:current={page === item} onclick={() => { page = item; error = ''; notice = ''; }}><Icon name={item}/><span>{item}</span></button>{/each}</nav>
+    <div class="sidebar-footer"><span class:online={!!status && !connection} class="connection-dot"></span><div><strong>{connection ? 'Not connected' : status ? 'Local engine' : 'Connecting'}</strong><span>Restic backup</span></div></div>
+  </aside>
+  <div class="workspace">
+    <main id="main" tabindex="-1">
+       <div class="page-heading"><h1>{page}</h1></div>
+      {#if connection}<div class="message warning" role="status"><strong>Local engine unavailable</strong><p>{connection}</p><button onclick={refresh} disabled={polling}>Reconnect</button></div>{/if}
+      {#if error}<div class="message error" role="alert"><p>{error}</p><button class="quiet" onclick={() => error = ''}>Dismiss</button></div>{/if}
+      {#if notice}<p class="message success" role="status">{notice}</p>{/if}
+       {#if status?.setup_error}<div class="message warning" role="status"><strong>Restic unavailable</strong><p>{status.setup_error}</p><p>Configure the restic executable in Settings.</p></div>{/if}
+      {#if !status && !connection}<div class="empty" aria-busy="true"><h2>Connecting to the local engine…</h2><p>Reading configuration and recent activity.</p></div>{/if}
+      {#if status && config}
+         {#if page === 'Profiles'}<Profiles {status} {busy} {ready} {save} {action}/><section class="profile-history" aria-labelledby="activity-heading"><div class="section-heading"><h2 id="activity-heading">Operation history</h2></div><Activity jobs={status.history.filter(job => job.id !== status?.active?.id)} repositories={config.repositories}/></section>
+        {:else if page === 'Repositories'}<Repositories {status} {busy} {ready} {save} {run} {action}/>
+        {:else if page === 'Snapshots'}<Snapshots {status} {busy} {ready} {run}/>
+        {:else}<Preferences {status} {busy} {save} {theme} changeTheme={setTheme} tray={hideToTray} changeTray={(enabled) => hideToTray = enabled}/>{/if}
+      {/if}
+    </main>
+     {#if status?.active}<aside class="jobbar" aria-label="Current operation"><div class="grow"><strong>{status.active.label || status.active.kind}</strong><p class="small muted">{status.active.message || 'Operation running. Other repository operations wait until this finishes.'}</p>{#if status.active.progress?.percent != null}<progress max="100" value={status.active.progress.percent} aria-label="Current operation progress"></progress>{/if}{#if status.active.destinations.length}<details><summary>Live destination results</summary><ul class="destination-results">{#each status.active.destinations as destination}<li><strong>{status.config.repositories.find(repo => repo.id === destination.repository_id)?.label ?? destination.repository_id}</strong><span class:bad={['failed', 'partial', 'interrupted'].includes(destination.state)}>{destination.state}</span><span class="muted">{destination.message}</span></li>{/each}</ul></details>{/if}</div><button onclick={cancel}>Cancel operation</button></aside>{/if}
+  </div>
+</div>

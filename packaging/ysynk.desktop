@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ysynk
+Comment=Encrypted restic backups with system keychain credentials
+Exec=ysynk-desktop
+Icon=ysynk
+Terminal=false
+Categories=Utility;Archiving;
+StartupNotify=true

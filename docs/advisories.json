@@ -1,0 +1,36 @@
+{
+  "database": "OSV public RustSec/npm data",
+  "packages_checked": 533,
+  "findings": [
+    {
+      "package": "deepmerge",
+      "version": "4.3.1",
+      "ecosystem": "npm",
+      "advisories": [
+        "GHSA-gcqx-w48m-w2h4"
+      ]
+    },
+    {
+      "package": "glib",
+      "version": "0.18.5",
+      "ecosystem": "crates.io",
+      "advisories": [
+        "GHSA-wrw7-89jp-8q8g",
+        "RUSTSEC-2024-0429"
+      ]
+    },
+    {
+      "package": "proc-macro-error",
+      "version": "1.0.4",
+      "ecosystem": "crates.io",
+      "advisories": [
+        "RUSTSEC-2024-0370"
+      ]
+    }
+  ],
+  "local_patch_notes": [
+    "GLib and deepmerge keep upstream versions: raw findings remain visible; see vendor/*BACKPORT.md for exact source remediation and tests.",
+    "Pinned Git dependencies are queried by their declared version too; this does not audit untagged commits."
+  ],
+  "limitations": "Known-version advisory check only; not a security audit or source-patch verifier"
+}

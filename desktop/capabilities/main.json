@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "Only the bundled main window may submit typed restic operations, request a native repository-password Save dialog, opt into close-to-tray or request graceful shutdown. No generic shell, filesystem, dialog or network bridge.",
+  "local": true,
+  "windows": ["main"],
+  "permissions": ["allow-request", "allow-export-repository-password", "allow-set-hide-to-tray", "allow-quit"]
+}

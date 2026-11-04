@@ -25,19 +25,22 @@ Screenshots show the application interface with sample data.
 
 ## Install
 
-The [0.5.1 release](https://github.com/qvga/ysynk/releases/tag/v0.5.1) provides
+The [0.5.2 release](https://github.com/qvga/ysynk/releases/tag/v0.5.2) provides
 Linux x86-64 assets. For Debian/Ubuntu, download the `.deb` and install it:
 
 ```sh
-sudo apt install ./ysynk_0.5.1_amd64.deb
+sudo apt install ./ysynk_0.5.2_amd64.deb
 ```
 
 The package requires restic **0.17.1 or newer**, GTK3, WebKitGTK 4.1 and
 AppIndicator. A persistent Secret Service keychain, such as GNOME Keyring or
 a compatible KWallet provider, must be available in the desktop session.
 
-The `.tar.gz` contains the same desktop executable and license notices, not a
-self-contained runtime. Install the same system dependencies before running it.
+The `.tar.gz` contains the desktop executable, license notices and an optional
+per-user desktop registration helper, not a self-contained runtime. Install the
+same system dependencies before running it. From the extracted directory, run
+`python3 tools/install-desktop-entry.py ./ysynk-desktop` to register its launcher
+and taskbar icon. Keep that directory in place while its launcher is registered.
 Release assets include `SHA256SUMS` for integrity checks:
 
 ```sh

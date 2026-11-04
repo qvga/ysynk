@@ -1,7 +1,8 @@
 # GLib 0.18.5 downstream backport
 
 `glib/` contains the published **glib 0.18.5** crate, with one upstream
-correctness fix backported by this project. This is not a new upstream release,
+correctness fix backported by this project and the compiler-warning cleanup
+described below. This is not a new upstream release,
 an upstream-supported 0.18 security release, or a claim that a version-based
 advisory scanner will recognize the fix. The package version remains `0.18.5`.
 The root Cargo patch selects this local source for the existing GTK dependency
@@ -26,7 +27,7 @@ chain; migration to a supported upstream stack remains separate work.
 - All 121 published files are retained, including the original normalized
   `Cargo.toml`, `Cargo.toml.orig`, README, COPYRIGHT, MIT LICENSE, source, tests,
   and benchmark/configuration files. No licensing terms were changed.
-- The **only changed published file** is `glib/src/variant_iter.rs`.
+- The correctness backport changes only `glib/src/variant_iter.rs`.
   `VariantStrIter::impl_get` changes `let p` to `let mut p` and `&p` to
   `&mut p`. This permits the FFI function to write its output pointer without
   writing through an immutable Rust reference. The hunk span and complete body
@@ -39,6 +40,24 @@ chain; migration to a supported upstream stack remains separate work.
 - The only added crate file is `tests/variant_str_iter_backport.rs`.
   It covers `next`, `nth`, `next_back`, `nth_back`, `last`, and `collect`,
   including empty and non-ASCII string values. This document is downstream-only.
+
+## Compiler-warning cleanup
+
+The pinned Rust 1.91 toolchain reports 34 warnings in the published source.
+Downstream syntax-only changes apply its suggestions without suppressing lints:
+
+- `src/value_array.rs`: remove three redundant parentheses around `dyn FnMut`
+  types.
+- `src/collections/list.rs`, `src/collections/slist.rs`, `src/enums.rs`,
+  `src/main_context.rs`, `src/object.rs`, `src/param_spec.rs`,
+  `src/subclass/types.rs`, `src/translate.rs`, `src/value.rs`, `src/variant.rs`,
+  and `src/variant_type.rs`: make 31 existing inferred lifetimes explicit with
+  `'_` or the already-named `'a` lifetime.
+
+These edits do not change behavior, dependency versions, or the correctness
+backport. All other published files remain unchanged. The expected SHA-256
+hashes for these 12 files and the correctness backport are retained in
+`tools/check-backports.py`.
 
 ## Verification
 

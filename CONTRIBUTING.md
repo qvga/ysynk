@@ -40,8 +40,14 @@ python3 tools/check_advisories.py --output docs/advisories.json
 
 The advisory command returns a failure status when findings exist. The report
 retains version findings for locally patched dependencies; see
-[dependency notes](docs/DEPENDENCIES.md). Vendored GLib emits upstream compiler
-warnings with the pinned toolchain.
+[dependency notes](docs/DEPENDENCIES.md). Vendored GLib includes syntax-only
+fixes for compiler warnings with the pinned toolchain; see its
+[backport notes](vendor/GLIB_BACKPORT.md).
+
+On Linux, the native tray library may print a `libayatana-appindicator`
+deprecation warning at startup. The pinned Tauri tray dependency loads the
+GTK AppIndicator library, not its GLib-only replacement. This warning is
+separate from Rust compiler warnings and does not indicate a failed build.
 
 Tests use temporary repositories and injected credentials. Never use an
 existing user's keychain for automated tests. Native-provider tests require an

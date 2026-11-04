@@ -24,10 +24,15 @@ const mock = () => {
   }
   globalThis.audit = {
     status, requests, finish,
+    appendOutput(lines, truncated = false) {
+      if (!status.active) throw new Error('No mock operation is active');
+      status.active.output = [...status.active.output, ...lines].slice(-200);
+      status.active.output_truncated ||= truncated;
+    },
     holdNextStatus() { holdNext = true; },
     releaseStatus() { if (!heldStatus) throw new Error('No status held'); const held = heldStatus; heldStatus = null; held.resolve(held.value); },
     get statusHeld() { return !!heldStatus; },
-    evict() { status.active = null; status.history = Array.from({ length: 100 }, (_, index) => ({ id: `new-${index}`, kind: 'backup', label: 'Scheduled backup (mock)', state: 'success', started_at: 1793664000, finished_at: 1793664060, profile_id: null, repository_id: 'local', message: 'Completed (mock)', progress: null, destinations: [], result: null })); },
+    evict() { status.active = null; status.history = Array.from({ length: 100 }, (_, index) => ({ id: `new-${index}`, kind: 'backup', label: 'Scheduled backup (mock)', state: 'success', started_at: 1793664000, finished_at: 1793664060, profile_id: null, repository_id: 'local', message: 'Completed (mock)', progress: null, destinations: [], result: null, output: [], output_truncated: false })); },
   };
   globalThis.isTauri = true;
   globalThis.__TAURI_INTERNALS__ = { async invoke(command, args) {
@@ -44,7 +49,7 @@ const mock = () => {
     if (request.op === 'save_config') { status.config = clone(request.config); status.config.revision++; return clone(status); }
     if (status.active) throw new Error('Another mock job is running');
     const id = `audit-${++serial}`;
-    status.active = { id, kind: request.op, label: `${request.op} (mock)`, state: 'running', started_at: 1793664000, finished_at: null, profile_id: null, repository_id: 'local', message: 'Operation running (mock)', progress: null, destinations: [], result: null };
+    status.active = { id, kind: request.op, label: `${request.op} (mock)`, state: 'running', started_at: 1793664000, finished_at: null, profile_id: null, repository_id: 'local', message: 'Operation running (mock)', progress: null, destinations: [], result: null, output: [], output_truncated: false };
     if (request.op === 'snapshots') finish('success', [{ id: 'abcdef1234567890', time: '2026-11-03T12:00:00Z', paths: ['/audit/Documents '], hostname: 'fixture' }]);
     if (request.op === 'list_files') finish('success', [{ type: 'file', name: 'draft.txt ', path: '/draft.txt ', size: 128 }]);
     return { job_id: id };

@@ -5,6 +5,8 @@
   import type { Config, Job, Request, Status } from './lib/types';
   import Icon from './lib/Icon.svelte';
   import Activity from './lib/Activity.svelte';
+  import CommandOutput from './lib/CommandOutput.svelte';
+  import { bytes } from './lib/model';
   import Profiles from './lib/Profiles.svelte';
   import Repositories from './lib/Repositories.svelte';
   import Snapshots from './lib/Snapshots.svelte';
@@ -108,6 +110,13 @@
         {:else}<Preferences {status} {busy} {save} {theme} changeTheme={setTheme}/>{/if}
       {/if}
     </main>
-     {#if status?.active}<aside class="jobbar" aria-label="Current operation"><div class="grow"><strong>{status.active.label || status.active.kind}</strong><p class="small muted">{status.active.message || 'Operation running. Other repository operations wait until this finishes.'}</p>{#if status.active.progress?.percent != null}<progress max="100" value={status.active.progress.percent} aria-label="Current operation progress"></progress>{/if}{#if status.active.destinations.length}<details><summary>Live destination results</summary><ul class="destination-results">{#each status.active.destinations as destination}<li><strong>{status.config.repositories.find(repo => repo.id === destination.repository_id)?.label ?? destination.repository_id}</strong><span class:bad={['failed', 'partial', 'interrupted'].includes(destination.state)}>{destination.state}</span><span class="muted">{destination.message}</span></li>{/each}</ul></details>{/if}</div><button onclick={cancel}>Cancel operation</button></aside>{/if}
+    {#if status?.active}
+      <aside class="jobbar" aria-label="Current operation">
+        <div class="job-heading"><div class="grow"><strong>{status.active.label || status.active.kind}</strong><p class="small muted">{status.active.message || 'Operation running. Other repository operations wait until this finishes.'}</p></div><button onclick={cancel}>Cancel operation</button></div>
+        {#key status.active.id}<CommandOutput output={status.active.output} truncated={status.active.output_truncated} active/>{/key}
+        {#if status.active.progress}<p class="small muted">{bytes(status.active.progress.bytes_done)} processed · {status.active.progress.files_done.toLocaleString()} files</p>{/if}
+        {#if status.active.destinations.length}<details><summary>Live destination results</summary><ul class="destination-results">{#each status.active.destinations as destination}<li><strong>{status.config.repositories.find(repo => repo.id === destination.repository_id)?.label ?? destination.repository_id}</strong><span class:bad={['failed', 'partial', 'interrupted'].includes(destination.state)}>{destination.state}</span><span class="muted">{destination.message}</span></li>{/each}</ul></details>{/if}
+      </aside>
+    {/if}
   </div>
 </div>

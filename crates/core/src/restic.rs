@@ -11,7 +11,10 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
+
+#[path = "console.rs"]
+pub(crate) mod console;
 
 pub(crate) struct Output {
     pub code: i32,
@@ -133,14 +136,40 @@ fn reader(
     mut pipe: impl Read + Send + 'static,
     overflow: Arc<AtomicBool>,
     retain: bool,
+    sink: Option<console::Sink>,
+    credential_guard: Option<(Arc<AtomicBool>, Arc<Zeroizing<String>>)>,
 ) -> thread::JoinHandle<std::io::Result<Zeroizing<Vec<u8>>>> {
     thread::spawn(move || {
         let mut output = Zeroizing::new(vec![]);
         let mut buffer = Zeroizing::new([0u8; 8192]);
+        let mut records = sink.map(console::Records::new);
+        let mut credential_tail = Zeroizing::new(Vec::new());
         loop {
             let n = pipe.read(buffer.as_mut())?;
             if n == 0 {
+                if let Some(records) = records.as_mut() {
+                    records.finish();
+                }
                 break;
+            }
+            if let Some(records) = records.as_mut() {
+                records.feed(&buffer[..n]);
+            }
+            if let Some((seen, password)) = &credential_guard {
+                // Preserve the fail-closed raw-stdout guard without retaining
+                // a command's output. Keep only enough overlap for split reads,
+                // including secrets inside oversized discarded records.
+                credential_tail.extend_from_slice(&buffer[..n]);
+                if credential_tail
+                    .windows(password.len())
+                    .any(|part| part == password.as_bytes())
+                {
+                    seen.store(true, Ordering::Release);
+                }
+                let start = credential_tail
+                    .len()
+                    .saturating_sub(password.len().saturating_sub(1));
+                credential_tail = Zeroizing::new(credential_tail[start..].to_vec());
             }
             if retain {
                 if output.len() + n > LIMIT {
@@ -179,6 +208,7 @@ fn backup_reader(
     pipe: impl Read + Send + 'static,
     overflow: Arc<AtomicBool>,
     progress: SyncSender<Progress>,
+    sink: Option<console::Sink>,
 ) -> thread::JoinHandle<std::io::Result<Zeroizing<Vec<u8>>>> {
     thread::spawn(move || {
         let mut pipe = std::io::BufReader::new(pipe);
@@ -190,10 +220,16 @@ fn backup_reader(
                 break;
             }
             if count > 65536 {
+                if let Some(sink) = &sink {
+                    sink.dropped();
+                }
                 overflow.store(true, Ordering::Release);
                 break;
             }
-            let value: serde_json::Value = serde_json::from_slice(&line).map_err(|_| {
+            if let Some(sink) = &sink {
+                sink.record(&line);
+            }
+            let mut value: serde_json::Value = serde_json::from_slice(&line).map_err(|_| {
                 overflow.store(true, Ordering::Release);
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
@@ -204,8 +240,10 @@ fn backup_reader(
                 let _ = progress.try_send(update);
             }
             if value["message_type"] == "summary" {
+                summary.zeroize();
                 *summary = std::mem::take(&mut *line);
             }
+            console::wipe(&mut value);
         }
         Ok(summary)
     })
@@ -216,14 +254,36 @@ pub(crate) fn run(
     cancel: &AtomicBool,
     timeout: Option<Duration>,
 ) -> Result<Output> {
-    run_inner(command, input, cancel, timeout, None)
+    run_inner(command, input, cancel, timeout, None, None)
 }
+#[cfg(test)]
 pub(crate) fn run_backup(
     command: Command,
     cancel: &AtomicBool,
     progress: &mut dyn FnMut(Progress),
 ) -> Result<Output> {
-    run_inner(command, None, cancel, None, Some(progress))
+    run_inner(command, None, cancel, None, Some(progress), None)
+}
+pub(crate) struct Live<'a> {
+    pub sink: console::Sink,
+    pub stdout: bool,
+    pub callback: &'a mut dyn FnMut(console::Tail),
+}
+pub(crate) fn run_live(
+    command: Command,
+    cancel: &AtomicBool,
+    progress: Option<&mut dyn FnMut(Progress)>,
+    live: Live<'_>,
+) -> Result<Output> {
+    run_inner(command, None, cancel, None, progress, Some(live))
+}
+fn deliver(live: &mut Option<Live<'_>>) {
+    if let Some(live) = live {
+        let tail = std::mem::take(&mut *live.sink.queue.lock().unwrap());
+        if !tail.lines.is_empty() || tail.truncated {
+            (live.callback)(tail);
+        }
+    }
 }
 fn run_inner(
     mut command: Command,
@@ -231,6 +291,7 @@ fn run_inner(
     cancel: &AtomicBool,
     timeout: Option<Duration>,
     mut progress: Option<&mut dyn FnMut(Progress)>,
+    mut live: Option<Live<'_>>,
 ) -> Result<Output> {
     ensure!(!cancel.load(Ordering::Acquire), "operation cancelled");
     if input.is_some() {
@@ -251,6 +312,7 @@ fn run_inner(
     let pipe_stop = Arc::new(AtomicBool::new(false));
     let overflow = Arc::new(AtomicBool::new(false));
     let (sender, updates) = mpsc::sync_channel(8);
+    let credential_seen = Arc::new(AtomicBool::new(false));
     let stdout_pipe = child.stdout.take().unwrap();
     let stderr_pipe = child.stderr.take().unwrap();
     #[cfg(unix)]
@@ -264,11 +326,33 @@ fn run_inner(
         stop: pipe_stop.clone(),
     };
     let stdout = if progress.is_some() {
-        backup_reader(stdout_pipe, overflow.clone(), sender)
+        backup_reader(
+            stdout_pipe,
+            overflow.clone(),
+            sender,
+            live.as_ref().filter(|l| l.stdout).map(|l| l.sink.clone()),
+        )
     } else {
-        reader(stdout_pipe, overflow.clone(), true)
+        reader(
+            stdout_pipe,
+            overflow.clone(),
+            // Console-only operations can run indefinitely with periodic
+            // progress. Retain raw stdout only for queries (and plain run()).
+            // Backup above keeps its separate bounded summary path.
+            !live.as_ref().is_some_and(|l| l.stdout),
+            live.as_ref().filter(|l| l.stdout).map(|l| l.sink.clone()),
+            live.as_ref()
+                .filter(|l| l.stdout)
+                .map(|l| (credential_seen.clone(), l.sink.password.clone())),
+        )
     };
-    let stderr = reader(stderr_pipe, overflow.clone(), false);
+    let stderr = reader(
+        stderr_pipe,
+        overflow.clone(),
+        false,
+        live.as_ref().map(|l| l.sink.clone()),
+        None,
+    );
     // Write independently so cancellation remains responsive.
     let writer = input.map(|input| {
         let pipe = child.stdin.take().unwrap();
@@ -284,6 +368,7 @@ fn run_inner(
     let mut interrupted = None;
     let mut timed_out = false;
     let status = loop {
+        deliver(&mut live);
         if let Some(callback) = progress.as_mut() {
             for update in updates.try_iter().take(8) {
                 callback(update);
@@ -328,6 +413,7 @@ fn run_inner(
             || !stderr.is_finished()
             || writer.as_ref().is_some_and(|writer| !writer.is_finished())
         {
+            deliver(&mut live);
             if let Some(callback) = progress.as_mut() {
                 for update in updates.try_iter().take(8) {
                     callback(update);
@@ -349,6 +435,7 @@ fn run_inner(
     };
     let out = stdout.join();
     let _ = stderr.join();
+    deliver(&mut live);
     if let Some(writer) = writer {
         let _ = writer.join();
     }
@@ -371,6 +458,10 @@ fn run_inner(
     let out = out
         .map_err(|_| anyhow::anyhow!("output reader failed"))?
         .map_err(|_| anyhow::anyhow!("could not read bounded subprocess output"))?;
+    ensure!(
+        !credential_seen.load(Ordering::Acquire),
+        "Restic output contained a credential; response withheld"
+    );
     let status = status?;
     Ok(Output {
         code: status.code().unwrap_or(130),

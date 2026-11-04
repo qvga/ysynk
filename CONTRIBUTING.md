@@ -62,6 +62,11 @@ it does not connect to the native engine or keychain. Check both audited
 window sizes (1120×800 and 720×580), themes, keyboard navigation, console errors
 and failed requests. Native integration still needs separate verification.
 
+The browser fixture also exercises live command output, paused scrolling,
+following the latest lines, and retained output after cancellation. Core tests
+use disposable subprocesses and injected credentials to verify streaming,
+credential filtering, output bounds and cancellation without the native keychain.
+
 ## Packaging
 
 ```sh

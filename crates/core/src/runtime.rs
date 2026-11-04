@@ -129,6 +129,10 @@ impl App {
             history.insert(0, interrupted);
         }
         history.truncate(100);
+        for job in &mut history {
+            job.output.clear();
+            job.output_truncated = false;
+        }
         let (version, setup_error) = match restic::version(&config.restic_path) {
             Ok(v) => (Some(v), None),
             Err(e) => (None, Some(e.to_string())),
@@ -161,12 +165,27 @@ impl App {
         let mut history = state.history.clone();
         for job in &mut history {
             job.result = None;
+            job.output.clear();
+            job.output_truncated = false;
+        }
+        let mut active = state.active.clone();
+        if let Some(job) = active.as_mut() {
+            job.output.clear();
+            job.output_truncated = false;
         }
         let saved = Persisted {
             history,
             attempts: state.attempts.clone(),
-            active: state.active.clone(),
+            active,
         };
+        let mut saved = serde_json::to_value(saved)?;
+        // Console paths and diagnostics are session-only, including admissions.
+        if let Some(history) = saved["history"].as_array_mut() {
+            for job in history {
+                strip_console(job);
+            }
+        }
+        strip_console(&mut saved["active"]);
         config::write(
             &self.directory.join("state.json"),
             &serde_json::to_vec(&saved)?,
@@ -421,6 +440,8 @@ impl App {
                     repository_id,
                     message: "Running".into(),
                     progress: None,
+                    output: vec![],
+                    output_truncated: false,
                     destinations: vec![],
                     result: None,
                 });
@@ -550,22 +571,67 @@ impl App {
         let mut command = restic::command(&c.restic_path);
         command
             .env("RESTIC_REPOSITORY", &repo.location)
-            .env("RESTIC_PASSWORD", &record.password);
+            .env("RESTIC_PASSWORD", &record.password)
+            .env("RESTIC_PROGRESS_FPS", "1");
         command
             .arg("--json")
             .arg("--cache-dir")
             .arg(self.directory.join("cache"))
             .args(args);
-        let output = if args.first().is_some_and(|arg| arg == "backup") {
-            self.state.lock().unwrap().active.as_mut().unwrap().progress = None;
-            restic::run_backup(command, &self.cancel, &mut |progress| {
-                if let Some(job) = self.state.lock().unwrap().active.as_mut() {
-                    job.progress = Some(progress);
+        let operation = args.first().map(String::as_str).unwrap_or("command");
+        if operation == "backup"
+            && let Some(job) = self.state.lock().unwrap().active.as_mut()
+        {
+            job.progress = None;
+        }
+        // Never copy query JSON, snapshot arrays or file listings into logs.
+        let stdout = matches!(operation, "backup" | "restore" | "check" | "prune" | "init");
+        self.console_line(format!("Starting {operation}"));
+        let sink = restic::console::Sink {
+            queue: Arc::new(Mutex::new(restic::console::Tail::default())),
+            password: Arc::new(zeroize::Zeroizing::new(record.password.to_string())),
+        };
+        let mut progress = |progress| {
+            if let Some(job) = self.state.lock().unwrap().active.as_mut() {
+                job.progress = Some(progress);
+            }
+        };
+        let mut callback = |tail: restic::console::Tail| {
+            let mut state = self.state.lock().unwrap();
+            if let Some(job) = state.active.as_mut() {
+                let mut output = restic::console::Tail {
+                    lines: std::mem::take(&mut job.output),
+                    truncated: job.output_truncated || tail.truncated,
+                };
+                for line in tail.lines {
+                    output.push(line);
                 }
-            })
-        } else {
-            restic::run(command, None, &self.cancel, None)
-        }?;
+                job.output = output.lines;
+                job.output_truncated = output.truncated;
+            }
+        };
+        let output = restic::run_live(
+            command,
+            &self.cancel,
+            if operation == "backup" {
+                Some(&mut progress)
+            } else {
+                None
+            },
+            restic::Live {
+                sink,
+                stdout,
+                callback: &mut callback,
+            },
+        );
+        self.console_line(match &output {
+            Ok(output) => format!(
+                "Finished {operation}: {}",
+                restic::exit_message(output.code)
+            ),
+            Err(_) => format!("Stopped {operation}: operation failed or was cancelled"),
+        });
+        let output = output?;
         ensure!(
             !output
                 .bytes
@@ -574,6 +640,17 @@ impl App {
             "Restic output contained a credential; response withheld"
         );
         Ok(output)
+    }
+    fn console_line(&self, line: String) {
+        if let Some(job) = self.state.lock().unwrap().active.as_mut() {
+            let mut tail = restic::console::Tail {
+                lines: std::mem::take(&mut job.output),
+                truncated: job.output_truncated,
+            };
+            tail.push(line);
+            job.output = tail.lines;
+            job.output_truncated = tail.truncated;
+        }
     }
     fn query(&self, c: &Config, repo: &Repository, args: &[String]) -> Result<Value> {
         let output = self.run(c, repo, args)?;
@@ -709,7 +786,12 @@ impl App {
     }
     fn backup(&self, c: &Config, profile: &Profile) -> Result<Value> {
         config::validate_overlap(c, &self.directory)?;
-        let mut args = strings(&["backup", "--tag", &format!("ysynk-profile:{}", profile.id)]);
+        let mut args = strings(&[
+            "backup",
+            "--verbose=2",
+            "--tag",
+            &format!("ysynk-profile:{}", profile.id),
+        ]);
         for exclude in &profile.excludes {
             args.push("--exclude".into());
             args.push(exclude.clone());
@@ -1035,6 +1117,12 @@ impl App {
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|s| (*s).to_owned()).collect()
 }
+fn strip_console(job: &mut Value) {
+    if let Some(job) = job.as_object_mut() {
+        job.remove("output");
+        job.remove("output_truncated");
+    }
+}
 fn due_profile(state: &State, now: u64) -> Option<String> {
     state
         .config
@@ -1276,3 +1364,7 @@ fn private_restore_directory(_: &Path) -> Result<File> {
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "runtime_tests.rs"]
+mod output_tests;

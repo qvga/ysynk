@@ -6,7 +6,7 @@ export interface Profile { id: string; label: string; sources: string[]; exclude
 export interface Config { revision: number; restic_path: string; repositories: Repository[]; profiles: Profile[] }
 export interface Progress { percent: number | null; bytes_done: number; total_bytes: number; files_done: number; total_files: number }
 export interface DestinationResult { repository_id: string; state: string; message: string; snapshot_id: string | null }
-export interface Job { id: string; kind: string; label: string; state: string; started_at: number; finished_at: number | null; profile_id: string | null; repository_id: string | null; message: string; progress: Progress | null; destinations: DestinationResult[]; result: unknown | null }
+export interface Job { id: string; kind: string; label: string; state: string; started_at: number; finished_at: number | null; profile_id: string | null; repository_id: string | null; message: string; progress: Progress | null; destinations: DestinationResult[]; result: unknown | null; output: string[]; output_truncated: boolean }
 export interface Status { config: Config; active: Job | null; history: Job[]; restic_version: string | null; setup_error: string | null }
 export interface Snapshot { id: string; time: string; paths?: string[]; tags?: string[]; hostname?: string; summary?: { total_bytes_processed?: number } }
 export interface FileNode { type: string; name: string; path: string; size?: number }

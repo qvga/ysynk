@@ -65,6 +65,10 @@ pub struct Job {
     pub repository_id: Option<String>,
     pub message: String,
     pub progress: Option<Progress>,
+    #[serde(default)]
+    pub output: Vec<String>,
+    #[serde(default)]
+    pub output_truncated: bool,
     pub destinations: Vec<DestinationResult>,
     pub result: Option<Value>,
 }

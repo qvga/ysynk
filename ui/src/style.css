@@ -104,9 +104,14 @@
   .destination-results { list-style: none; padding: 0; margin: 12px 0 0; }
   .destination-results li { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; padding: 6px 0; }
   .destination-results li strong { min-width: 120px; font-weight: 550; }
-  progress { display: block; width: 100%; height: 5px; accent-color: var(--accent); margin-top: 12px; }
-  .jobbar { display: flex; align-items: center; gap: 24px; background: var(--surface); border-top: 1px solid var(--line); position: sticky; bottom: 0; padding: 18px 40px; }
+  .jobbar { background: var(--surface); border-top: 1px solid var(--line); position: sticky; bottom: 0; padding: 14px 40px; max-height: 55dvh; overflow: auto; }
+  .job-heading { display: flex; align-items: center; gap: 20px; }
   .jobbar p { margin-top: 4px; }
+  .command-output { min-width: 0; margin-top: 10px; }
+  .output-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 28px; font-size: 12px; }
+  pre.output-scroll { margin: 4px 0 0; padding: 10px 12px; height: clamp(96px, 16dvh, 144px); max-height: none; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: var(--rail); border: 1px solid var(--line); border-radius: 5px; line-height: 1.5; overscroll-behavior: contain; scroll-behavior: auto; }
+  .output-retention { max-width: none; }
+  .history-output .output-scroll { height: 180px; }
   details { margin-top: 12px; }
   summary { cursor: pointer; color: var(--accent); width: fit-content; font-size: 12px; text-underline-offset: 3px; }
   summary:hover { text-decoration: underline; }
@@ -176,7 +181,7 @@
     .row-main > .muted { margin-left: 0; width: 100%; } .facts { gap: 24px; flex-wrap: wrap; }
     .settings-list > div { grid-template-columns: 1fr; gap: 6px; } .query-toolbar { flex-wrap: wrap; } .query-toolbar label { flex-basis: 100%; }
     .snapshot-row { flex-wrap: wrap; gap: 6px; padding-inline: 8px; } .snapshot-row > span { width: 100%; } .selection-bar { flex-wrap: wrap; }
-    .jobbar { padding: 14px 18px; flex-wrap: wrap; gap: 12px; } .jobbar > .grow { flex-basis: 100%; }
+    .jobbar { padding: 12px 18px; } .job-heading { gap: 12px; flex-wrap: wrap; }
     .form-grid { grid-template-columns: 1fr; } dialog { padding: 18px; max-height: calc(100dvh - 24px); } .dialog-actions { bottom: -18px; flex-wrap: wrap; } .dialog-actions button { white-space: normal; }
   }
   @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; animation: none !important; scroll-behavior: auto !important; } }

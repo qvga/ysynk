@@ -40,6 +40,12 @@ and passed through `RESTIC_PASSWORD`, never argv, config, logs or UI responses.
 Status polling does not query the keychain. Background jobs do not silently
 unlock the OS credential store; the user manages its availability in the desktop.
 
+Live command output is bounded and repository passwords are removed before
+lines reach the renderer. Output can include source paths and backend diagnostic
+messages; it is not a public support log. Recent output remains available in
+memory for completed jobs, but is omitted from persisted operation history.
+Command arguments and environment variables are not displayed.
+
 The signed-in user, OS keychain, restic executable, SSH/client helpers and host
 are trusted. An unlocked desktop keychain is not protection against malware
 running as that user or root. Child environments and process memory can be

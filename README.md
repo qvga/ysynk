@@ -16,7 +16,7 @@ Screenshots show the application interface with sample data.
 
 - Backup profiles with source paths, exclusions and multiple repositories.
 - Manual backups and interval schedules while the app is running.
-- Per-destination results, progress and cancellation.
+- Per-destination results, live command output and cancellation.
 - Snapshot browsing and restoration to a new directory.
 - Retention previews with explicit deletion confirmation; separate pruning.
 - System keychain credentials and explicit password export for recovery.
@@ -57,6 +57,12 @@ not been validated. Safe restore and password export currently require Linux.
 
 Retention and prune operations are in **Repositories**. Deletion requires a
 preview and confirmation. Existing restore output paths are not overwritten.
+
+While an operation runs, **Command output** shows recent restic activity and
+diagnostics. It follows new lines automatically; scroll up to read earlier
+output, then select **Follow output** to return to the latest lines. Completed
+output is available in operation history until the app closes. Only a bounded
+tail is retained, not a complete command transcript.
 
 ### Start automatically
 
@@ -120,6 +126,18 @@ npm ci
 
 `dev.sh` builds the bundled frontend and a cached debug executable, then starts
 the application. It does not install dependencies or start a frontend server.
+For the application menu and the correct taskbar icon on GNOME/Wayland,
+register the built executable once:
+
+```sh
+python3 tools/install-desktop-entry.py
+```
+
+This creates a user-local launcher pointing to this checkout's debug executable
+and icon. Reopen ysynk afterwards. Pass a different executable path to register
+a release build, and repeat registration if you move the checkout. Executable
+paths containing `=` or `%` cannot be registered. Installed Debian packages
+already include desktop integration.
 Build, test and packaging commands are in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License

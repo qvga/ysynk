@@ -8,7 +8,8 @@ export interface Progress { percent: number | null; bytes_done: number; total_by
 export interface DestinationResult { repository_id: string; state: string; message: string; snapshot_id: string | null }
 export interface Job { id: string; kind: string; label: string; state: string; started_at: number; finished_at: number | null; profile_id: string | null; repository_id: string | null; message: string; progress: Progress | null; destinations: DestinationResult[]; result: unknown | null; output: string[]; output_truncated: boolean }
 export interface Status { config: Config; active: Job | null; history: Job[]; restic_version: string | null; setup_error: string | null }
-export interface Snapshot { id: string; time: string; paths?: string[]; tags?: string[]; hostname?: string; summary?: { total_bytes_processed?: number } }
+export interface SnapshotSummary { total_bytes_processed?: number; total_files_processed?: number; files_new?: number; files_changed?: number; files_unmodified?: number; data_added?: number; data_added_packed?: number; backup_start?: string; backup_end?: string }
+export interface Snapshot { id: string; time: string; paths?: string[]; tags?: string[]; hostname?: string; summary?: SnapshotSummary | null }
 export interface FileNode { type: string; name: string; path: string; size?: number }
 export interface RetentionPreview { token: string; remove: Snapshot[]; keep_count: number }
 export type Request =

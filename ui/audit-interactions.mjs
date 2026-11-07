@@ -53,6 +53,13 @@ export async function verifyAuditUi() {
   assert(button('Loading…')?.disabled && !document.querySelector('.snapshot-row'), 'Pre-admission status settled the query');
   audit.releaseStatus(); await wait(() => document.querySelector('.snapshot-row'));
   document.querySelector('.snapshot-row').click(); await frame();
+  const details = () => document.querySelector('.snapshot-details').innerText;
+  assert(details().includes('2 KiB') && details().includes('1 min 5 s') && details().includes('New files\n0'), 'Reported snapshot statistics are missing');
+  const queryCount = audit.requests.filter(item => item.command === 'request' && item.args.request.op !== 'status').length;
+  document.querySelectorAll('.snapshot-row')[1].click(); await frame();
+  assert(details().includes('older-host') && !details().includes('2 KiB') && document.body.innerText.includes('No backup statistics were reported'), 'Older snapshot shows stale statistics');
+  document.querySelector('.snapshot-row').click(); await frame();
+  assert(details().includes('2 KiB') && audit.requests.filter(item => item.command === 'request' && item.args.request.op !== 'status').length === queryCount, 'Snapshot selection runs an extra query or loses statistics');
 
   const startRestore = async target => {
     await click('Restore snapshot…');

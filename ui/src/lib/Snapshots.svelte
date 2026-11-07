@@ -1,7 +1,7 @@
 <script lang="ts">
   import Dialog from './Dialog.svelte';
   import type { FileNode, Run, Snapshot, Status } from './types';
-  import { assertSuccess, bytes, date, files, isCurrent, snapshots } from './model';
+  import { assertSuccess, bytes, date, files, isCurrent, snapshots, snapshotStats } from './model';
   let { status, busy, ready, run }: { status: Status; busy: boolean; ready: boolean; run: Run } = $props();
   let repositoryId = $state(''); let snapshot = $state<Snapshot | null>(null); let path = $state('/'); let pathInput = $state('/');
   let items = $state<Snapshot[] | null>(null); let nodes = $state<FileNode[] | null>(null); let selectedPaths = $state<string[]>([]);
@@ -11,6 +11,7 @@
   let repository = $derived(status.config.repositories.find(repo => repo.id === repositoryId));
   let scope = $derived(repository ? `${repository.id}:${repository.location}:${status.config.revision}` : '');
   let fileScope = $derived(`${scope}:${snapshot?.id ?? ''}:${path}`);
+  let stats = $derived(snapshot ? snapshotStats(snapshot) : []);
   function reset() { ticket++; snapshot = null; items = null; nodes = null; selectedPaths = []; error = ''; notice = ''; loading = false; listing = false; path = '/'; pathInput = '/'; }
   async function load() {
     if (!repository) return;
@@ -62,6 +63,13 @@
 {:else}<div class="empty"><h2>Load snapshots on demand</h2><p>Load snapshots to see what restic reports. Repository and keychain access are checked when the query runs.</p></div>{/if}
 
 {#if snapshot && snapshotScope === scope}<section class="browser"><div class="section-heading"><div><h2>{date(snapshot.time)}</h2><p class="muted path">{snapshot.id}</p></div><button disabled={busy || !ready} onclick={() => openRestore(true)}>Restore snapshot…</button></div>
+  <dl class="snapshot-details">
+    <div><dt>Host</dt><dd>{snapshot.hostname || 'Not reported'}</dd></div>
+    <div><dt>Source paths</dt><dd class="path">{#each snapshot.paths ?? [] as source}<div>{source}</div>{:else}Not reported{/each}</dd></div>
+    {#if snapshot.tags?.length}<div><dt>Tags</dt><dd>{snapshot.tags.join(', ')}</dd></div>{/if}
+    {#each stats as stat}<div><dt>{stat.label}</dt><dd>{stat.value}</dd></div>{/each}
+  </dl>
+  <p class="hint">{stats.length ? 'Statistics recorded when this backup was created; data added is not the snapshot’s restore size or current repository usage.' : 'No backup statistics were reported for this snapshot.'}</p>
   <form class="query-toolbar" onsubmit={(event) => { event.preventDefault(); void browse(pathInput); }}><label>Snapshot directory<input class="path" bind:value={pathInput} required placeholder="/"/></label><button type="button" disabled={busy || !ready || path === '/'} onclick={() => browse(parent(path))}>Up</button><button disabled={busy || !ready}>{loading ? 'Reading…' : 'Open directory'}</button></form>
   {#if loading}<p class="hint" aria-busy="true">Reading this directory…</p>
   {:else if nodes && directoryScope === fileScope}<div class="file-list">{#if !nodes.length}<p class="empty">No entries reported in this directory.</p>{/if}{#each nodes as node}<div class="file-row"><input type="checkbox" aria-label={`Select ${node.path}`} checked={selectedPaths.includes(node.path)} onchange={() => toggle(node)}/><div class="grow">{#if node.type === 'dir'}<button class="text-button" disabled={busy || !ready} onclick={() => browse(node.path)}>{node.name || node.path}/</button>{:else}<strong>{node.name || node.path}</strong>{/if}<p class="path muted">{node.path}</p></div><span class="muted small">{node.type === 'dir' ? 'Directory' : node.type === 'file' ? bytes(node.size) : node.type}</span></div>{/each}</div>

@@ -1,8 +1,22 @@
 import { describe, expect, it } from 'vitest';
-import { assertSuccess, files, isCurrent, lines, preview, snapshots } from './model';
+import { assertSuccess, files, isCurrent, lines, preview, snapshots, snapshotStats } from './model';
 import type { Job } from './types';
 
 describe('query results', () => {
+  it('shows reported snapshot totals and keeps zero file counts', () => {
+    expect(snapshotStats({ id: 'one', time: '', summary: { total_bytes_processed: 2048, total_files_processed: 3, files_new: 0, files_changed: 1, files_unmodified: 2, data_added: 1024, data_added_packed: 512, backup_start: '2026-11-03T12:00:00Z', backup_end: '2026-11-03T12:01:05Z' } })).toEqual([
+      { label: 'Data processed', value: '2 KiB' }, { label: 'Files processed', value: '3' },
+      { label: 'New files', value: '0' }, { label: 'Changed files', value: '1' }, { label: 'Unchanged files', value: '2' },
+      { label: 'Data added (uncompressed)', value: '1 KiB' }, { label: 'Data added (compressed)', value: '512 B' },
+      { label: 'Backup duration', value: '1 min 5 s' },
+    ]);
+  });
+  it('omits absent and invalid snapshot statistics', () => {
+    expect(snapshotStats({ id: 'old', time: '' })).toEqual([]);
+    expect(snapshotStats({ id: 'old', time: '', summary: null })).toEqual([]);
+    expect(snapshotStats({ id: 'partial', time: '', summary: { files_new: -1, total_bytes_processed: NaN, total_files_processed: Infinity, backup_start: 'invalid', backup_end: 'invalid' } })).toEqual([]);
+    expect(snapshotStats({ id: 'partial', time: '', summary: { files_changed: 0, backup_start: '2026-11-03T12:01:00Z', backup_end: '2026-11-03T12:00:00Z' } })).toEqual([{ label: 'Changed files', value: '0' }]);
+  });
   it('preserves spaces in source paths and exclusion patterns when separating lines', () => {
     expect(lines('/home/user/Documents \r\n\n **/draft \n  ')).toEqual(['/home/user/Documents ', ' **/draft ', '  ']);
   });

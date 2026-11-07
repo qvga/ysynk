@@ -25,11 +25,11 @@ Screenshots show the application interface with sample data.
 
 ## Install
 
-The [0.5.2 release](https://github.com/qvga/ysynk/releases/tag/v0.5.2) provides
+The [0.5.3 release](https://github.com/qvga/ysynk/releases/tag/v0.5.3) provides
 Linux x86-64 assets. For Debian/Ubuntu, download the `.deb` and install it:
 
 ```sh
-sudo apt install ./ysynk_0.5.2_amd64.deb
+sudo apt install ./ysynk_0.5.3_amd64.deb
 ```
 
 The package requires restic **0.17.1 or newer**, GTK3, WebKitGTK 4.1 and

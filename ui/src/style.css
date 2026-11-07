@@ -148,6 +148,9 @@
   .snapshot-row.selected { background: var(--accent-soft); color: var(--accent); }
   .snapshot-row code { flex-shrink: 0; }
   .browser { padding-top: 28px; border-top: 1px solid var(--line); }
+  .snapshot-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr)); gap: 20px 28px; margin: 20px 0; }
+  .snapshot-details > div { min-width: 0; }
+  .snapshot-details dd { margin-top: 6px; overflow-wrap: anywhere; }
   .file-row { display: flex; align-items: flex-start; gap: 14px; padding: 13px 0; border-bottom: 1px solid var(--line); }
   .file-row strong { font-weight: 500; font-size: 13px; overflow-wrap: anywhere; }
   .file-row p { margin-top: 3px; }

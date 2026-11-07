@@ -13,6 +13,31 @@ export function date(value: string | number | null): string {
   const result = new Date(typeof value === 'number' ? value * 1000 : value);
   return Number.isNaN(result.getTime()) ? 'Not reported' : result.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
 }
+export function snapshotStats(snapshot: Snapshot): { label: string; value: string }[] {
+  const summary = snapshot.summary;
+  if (!summary) return [];
+  const fields = [
+    ['total_bytes_processed', 'Data processed', bytes],
+    ['total_files_processed', 'Files processed', (value: number) => new Intl.NumberFormat().format(value)],
+    ['files_new', 'New files', (value: number) => new Intl.NumberFormat().format(value)],
+    ['files_changed', 'Changed files', (value: number) => new Intl.NumberFormat().format(value)],
+    ['files_unmodified', 'Unchanged files', (value: number) => new Intl.NumberFormat().format(value)],
+    ['data_added', 'Data added (uncompressed)', bytes],
+    ['data_added_packed', 'Data added (compressed)', bytes],
+  ] as const;
+  const stats: { label: string; value: string }[] = fields.flatMap(([key, label, format]) => {
+    const value = summary[key];
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? [{ label, value: format(value) }] : [];
+  });
+  const start = Date.parse(summary.backup_start ?? '');
+  const end = Date.parse(summary.backup_end ?? '');
+  if (Number.isFinite(start) && Number.isFinite(end) && end >= start) {
+    const seconds = Math.round((end - start) / 1000);
+    const duration = seconds < 60 ? `${seconds} s` : seconds < 3600 ? `${Math.floor(seconds / 60)} min ${seconds % 60} s` : `${Math.floor(seconds / 3600)} h ${Math.floor(seconds % 3600 / 60)} min`;
+    stats.push({ label: 'Backup duration', value: duration });
+  }
+  return stats;
+}
 export function assertSuccess(job: Job): unknown {
   if (job.state !== 'success') throw new Error(job.message || `Operation ${job.state}. See activity for details.`);
   if (job.result == null) throw new Error('This result is no longer available. Run the query again.');

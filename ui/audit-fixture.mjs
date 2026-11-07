@@ -50,7 +50,10 @@ const mock = () => {
     if (status.active) throw new Error('Another mock job is running');
     const id = `audit-${++serial}`;
     status.active = { id, kind: request.op, label: `${request.op} (mock)`, state: 'running', started_at: 1793664000, finished_at: null, profile_id: null, repository_id: 'local', message: 'Operation running (mock)', progress: null, destinations: [], result: null, output: [], output_truncated: false };
-    if (request.op === 'snapshots') finish('success', [{ id: 'abcdef1234567890', time: '2026-11-03T12:00:00Z', paths: ['/audit/Documents '], hostname: 'fixture' }]);
+    if (request.op === 'snapshots') finish('success', [
+      { id: 'abcdef1234567890', time: '2026-11-03T12:00:00Z', paths: ['/audit/Documents '], hostname: 'fixture', tags: ['documents'], summary: { total_bytes_processed: 2048, total_files_processed: 3, files_new: 0, files_changed: 1, files_unmodified: 2, data_added: 1024, data_added_packed: 512, backup_start: '2026-11-03T12:00:00Z', backup_end: '2026-11-03T12:01:05Z' } },
+      { id: 'older1234567890', time: '2026-11-02T12:00:00Z', paths: ['/audit/Older'], hostname: 'older-host' },
+    ]);
     if (request.op === 'list_files') finish('success', [{ type: 'file', name: 'draft.txt ', path: '/draft.txt ', size: 128 }]);
     return { job_id: id };
   } };

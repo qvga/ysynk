@@ -12,7 +12,7 @@ Download the Debian package and `SHA256SUMS` from the same release. From the dir
 
 ```sh
 sha256sum --ignore-missing --check SHA256SUMS
-sudo apt install ./ysynk_0.5.4_amd64.deb
+sudo apt install ./ysynk_0.5.5_amd64.deb
 ```
 
 Check that the package is listed as `OK` before installing. The package requires restic 0.17.1 or later, GTK3, WebKitGTK 4.1, and AppIndicator. Sign in to a Linux desktop with a persistent Secret Service keychain, such as GNOME Keyring. A standalone executable archive is also available for systems with those dependencies. [Archive installation](docs/guide.md#install-from-the-archive)

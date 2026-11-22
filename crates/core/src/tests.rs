@@ -98,6 +98,70 @@ fn check(repo: &Repository) -> Request {
 }
 
 #[test]
+fn cancellation_only_stops_the_displayed_job() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let repo = repository(dir.path());
+    let store = Arc::new(FakeStore::default());
+    let app = open(
+        dir.path().join("app"),
+        store.clone(),
+        dir.path().join("locks"),
+        &Config {
+            repositories: vec![repo.clone()],
+            profiles: vec![Profile {
+                id: "profile".into(),
+                label: "Fixture".into(),
+                sources: vec![dir.path().join("source").to_str().unwrap().into()],
+                excludes: vec![],
+                repository_ids: vec![repo.id.clone()],
+                schedule_minutes: 0,
+                retention: Retention {
+                    keep_last: 1,
+                    keep_daily: 0,
+                    keep_weekly: 0,
+                    keep_monthly: 0,
+                },
+            }],
+            ..Config::default()
+        },
+    )?;
+    let cancel = |id: &str| {
+        app.request(serde_json::from_value(
+            json!({"op":"cancel_job", "job_id":id}),
+        )?)
+    };
+    let completed = finish(&app, check(&repo))?;
+    assert!(cancel(&completed.id).is_err());
+
+    for matching in [false, true] {
+        // Keep the worker inside its keychain read until the cancel requests return.
+        let entered = Arc::new(Barrier::new(2));
+        let resume = Arc::new(Barrier::new(2));
+        *store.pause.lock().unwrap() = Some((entered.clone(), resume.clone()));
+        let admitted = app.request(Request::Backup {
+            profile_id: "profile".into(),
+        })?;
+        let active_id = admitted["job_id"].as_str().unwrap();
+        entered.wait();
+        let stale = cancel(&completed.id);
+        let accepted = matching.then(|| (cancel(active_id), cancel(active_id)));
+        resume.wait();
+        assert!(stale.is_err());
+        if let Some((first, repeated)) = accepted {
+            assert_eq!(first?, Value::Null);
+            assert_eq!(repeated?, Value::Null);
+        }
+        let result = wait(&app)?;
+        assert_eq!(result.id, active_id);
+        assert_eq!(result.state, if matching { "cancelled" } else { "failed" });
+        assert_eq!(result.destinations[0].state, "failed");
+        assert!(cancel(active_id).is_err());
+    }
+    app.shutdown();
+    Ok(())
+}
+
+#[test]
 fn audit_save_rejects_ambiguous_credentials_without_exposing_them() -> Result<()> {
     for location in [
         "rest:https://alice:SENTINEL@host/repo",

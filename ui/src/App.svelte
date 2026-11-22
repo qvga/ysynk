@@ -6,6 +6,7 @@
   import type { Config, Job, Request, Status } from './lib/types';
   import Icon from './lib/Icon.svelte';
   import Activity from './lib/Activity.svelte';
+  import CancelOperation from './lib/CancelOperation.svelte';
   import CommandOutput from './lib/CommandOutput.svelte';
   import { bytes, jobTitle } from './lib/model';
   import Profiles from './lib/Profiles.svelte';
@@ -140,14 +141,6 @@
       sending = false;
     }
   }
-  async function cancel() {
-    try {
-      await request<null>({ op: 'cancel' });
-      notice = 'Cancellation requested. Wait for the operation to stop.';
-    } catch {
-      error = 'Cancellation could not be sent. Reconnect and check activity.';
-    }
-  }
   function setTheme(value: string) {
     theme = value;
     try {
@@ -272,7 +265,7 @@
                 'Operation running. Other repository operations wait until this finishes.'}
             </p>
           </div>
-          <button onclick={cancel}>Cancel operation</button>
+          {#key status.active.id}<CancelOperation jobId={status.active.id} />{/key}
         </div>
         {#key status.active.id}<CommandOutput
             output={status.active.output}

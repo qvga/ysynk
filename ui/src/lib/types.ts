@@ -14,6 +14,7 @@ export interface FileNode { type: string; name: string; path: string; size?: num
 export interface RetentionPreview { token: string; remove: Snapshot[]; keep_count: number }
 export type Request =
   | { op: 'status' | 'cancel' }
+  | { op: 'cancel_job'; job_id: string }
   | { op: 'save_config'; config: Config }
   | { op: 'initialize' | 'snapshots' | 'stats' | 'check'; repository_id: string }
   | { op: 'backup'; profile_id: string }

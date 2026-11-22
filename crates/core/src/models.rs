@@ -133,6 +133,11 @@ pub enum Request {
         repository_id: String,
         confirmation: String,
     },
+    /// Cancel the displayed job only while it still owns the active slot.
+    CancelJob {
+        job_id: String,
+    },
+    /// Legacy request targeting whichever job is active at receipt.
     Cancel,
 }
 fn root() -> String {

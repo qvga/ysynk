@@ -16,6 +16,7 @@ const mock = () => {
   let serial = 0;
   let heldStatus = null;
   let holdNext = false;
+  let nextCancellation = null;
   const clone = value => JSON.parse(JSON.stringify(value));
   function finish(state = 'success', result = null) {
     if (!status.active) throw new Error('No mock operation is active');
@@ -32,6 +33,14 @@ const mock = () => {
     holdNextStatus() { holdNext = true; },
     releaseStatus() { if (!heldStatus) throw new Error('No status held'); const held = heldStatus; heldStatus = null; held.resolve(held.value); },
     get statusHeld() { return !!heldStatus; },
+    deferNextCancellation() {
+      let release, fail;
+      nextCancellation = new Promise((resolve, reject) => {
+        release = resolve;
+        fail = () => reject(new Error('Cancellation request failed (mock).'));
+      });
+      return { release, fail };
+    },
     evict() { status.active = null; status.history = Array.from({ length: 100 }, (_, index) => ({ id: `new-${index}`, kind: 'backup', label: 'Scheduled backup (mock)', state: 'success', started_at: 1793664000, finished_at: 1793664060, profile_id: null, repository_id: 'local', message: 'Completed (mock)', progress: null, destinations: [], result: null, output: [], output_truncated: false })); },
   };
   globalThis.isTauri = true;
@@ -46,6 +55,13 @@ const mock = () => {
       return value;
     }
     if (request.op === 'cancel') { finish('cancelled'); return null; }
+    if (request.op === 'cancel_job') {
+      const deferred = nextCancellation;
+      nextCancellation = null;
+      if (deferred) await deferred;
+      if (status.active?.id !== request.job_id) throw new Error('The selected operation is no longer active.');
+      return null;
+    }
     if (request.op === 'save_config') { status.config = clone(request.config); status.config.revision++; return clone(status); }
     if (status.active) throw new Error('Another mock job is running');
     const id = `audit-${++serial}`;

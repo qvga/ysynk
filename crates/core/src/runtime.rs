@@ -314,18 +314,27 @@ impl App {
         Ok(())
     }
     pub fn request(self: &Arc<Self>, request: Request) -> Result<Value> {
-        if matches!(request, Request::Cancel) {
-            let _state = self.state.lock().unwrap();
-            self.cancel.store(true, Ordering::Release);
-            return Ok(Value::Null);
-        }
         let mut state = self.state.lock().unwrap();
         self.request_locked(&mut state, request)
     }
     fn request_locked(self: &Arc<Self>, state: &mut State, request: Request) -> Result<Value> {
         Self::expire(state);
-        if matches!(request, Request::Status) {
-            return Ok(serde_json::to_value(&state.status)?);
+        match &request {
+            Request::Status => return Ok(serde_json::to_value(&state.status)?),
+            Request::CancelJob { job_id }
+                if state
+                    .status
+                    .active
+                    .as_ref()
+                    .is_none_or(|job| &job.id != job_id) =>
+            {
+                bail!("The selected operation is no longer active. Check activity for its result.");
+            }
+            Request::Cancel | Request::CancelJob { .. } => {
+                self.cancel.store(true, Ordering::Release);
+                return Ok(Value::Null);
+            }
+            _ => {}
         }
         self.ensure_idle(state)?;
         match request {
@@ -514,7 +523,9 @@ impl App {
         } else {
             match outcome {
                 Ok(value) => {
-                    if job.state == "running" {
+                    if job.kind == "backup" {
+                        summarize_backup(&mut job);
+                    } else {
                         job.state = "success".into();
                         job.message = "Completed".into();
                     }
@@ -857,8 +868,6 @@ impl App {
         }
         args.push("--".into());
         args.extend(profile.sources.clone());
-        let mut success = 0;
-        let mut partial = 0;
         for id in &profile.repository_ids {
             if self.cancel.load(Ordering::Acquire) {
                 bail!("operation cancelled");
@@ -869,14 +878,8 @@ impl App {
             let (state, message) = match outcome {
                 Ok(output) => {
                     let state = match output.code {
-                        0 => {
-                            success += 1;
-                            "success"
-                        }
-                        3 => {
-                            partial += 1;
-                            "partial"
-                        }
+                        0 => "success",
+                        3 => "partial",
                         _ => "failed",
                     };
                     if let Ok(summary) = serde_json::from_slice::<Value>(&output.bytes) {
@@ -913,21 +916,6 @@ impl App {
                     snapshot_id,
                 });
         }
-        let mut state = self.state.lock().unwrap();
-        let job = state.status.active.as_mut().unwrap();
-        job.state = if success == profile.repository_ids.len() {
-            "success"
-        } else if success > 0 || partial > 0 {
-            "partial"
-        } else {
-            "failed"
-        }
-        .into();
-        let total = profile.repository_ids.len();
-        let failed = total - success - partial;
-        job.message = format!(
-            "{success} of {total} destinations completed, {partial} incomplete, {failed} failed."
-        );
         Ok(Value::Null)
     }
     fn repository_identity(&self, c: &Config, repo: &Repository) -> Result<String> {
@@ -1167,6 +1155,31 @@ impl App {
 }
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|s| (*s).to_owned()).collect()
+}
+fn summarize_backup(job: &mut Job) {
+    let total = job.destinations.len();
+    let success = job
+        .destinations
+        .iter()
+        .filter(|d| d.state == "success")
+        .count();
+    let partial = job
+        .destinations
+        .iter()
+        .filter(|d| d.state == "partial")
+        .count();
+    let failed = total - success - partial;
+    job.state = if success == total {
+        "success"
+    } else if success > 0 || partial > 0 {
+        "partial"
+    } else {
+        "failed"
+    }
+    .into();
+    job.message = format!(
+        "{success} of {total} destinations completed, {partial} incomplete, {failed} failed."
+    );
 }
 /// The journal has an explicit allowlist so console paths and query results
 /// stay in memory. Serializing this view never clones those larger payloads.

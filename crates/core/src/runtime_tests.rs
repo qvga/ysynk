@@ -157,6 +157,49 @@ fn executable(path: &Path, script: &str) -> Result<()> {
 
 #[cfg(unix)]
 #[test]
+fn backup_publishes_its_outcome_only_when_it_moves_to_history() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let script = dir.path().join("fixture-restic");
+    executable(
+        &script,
+        "#!/bin/sh\nif [ \"$1\" = version ]; then echo 'restic 0.18.1'; exit 0; fi\nexit 3\n",
+    )?;
+    let (app, _) = fixture(dir.path(), script.to_str().unwrap())?;
+    // Step the worker at the exact boundary between perform and complete.
+    // Polling a live thread could miss a transient terminal state in active.
+    let config = {
+        let mut state = app.state.lock().unwrap();
+        state.status.active = Some(serde_json::from_value(json!({
+            "id":"backup", "kind":"backup", "label":"backup", "state":"running", "started_at":1,
+            "profile_id":"console-profile", "message":"Running", "destinations":[]
+        }))?);
+        state.status.config.clone()
+    };
+    let outcome = app.perform(
+        Request::Backup {
+            profile_id: "console-profile".into(),
+        },
+        &config,
+    )?;
+    let during = app.request(Request::Status)?;
+    assert_eq!(during["active"]["state"], "running");
+    assert!(during["active"]["finished_at"].is_null());
+    assert_eq!(during["active"]["destinations"][0]["state"], "partial");
+    assert_eq!(during["history"], json!([]));
+
+    app.complete(Ok(outcome));
+    let after = app.request(Request::Status)?;
+    assert!(after["active"].is_null());
+    assert_eq!(after["history"][0]["state"], "partial");
+    assert_eq!(
+        after["history"][0]["message"],
+        "0 of 1 destinations completed, 1 incomplete, 0 failed."
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn failed_and_cancelled_jobs_keep_sanitized_live_output_without_persisting_it() -> Result<()> {
     for cancelled in [false, true] {
         let dir = tempfile::tempdir()?;

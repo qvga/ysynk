@@ -25,7 +25,9 @@
   let toolId = $state('');
   let toolError = $state('');
   let toolNotice = $state('');
-  let loading = $state(false);
+  type Query = 'stats' | 'retention_preview' | 'check';
+  let pendingTool = $state<Query | 'maintenance' | null>(null);
+  let loading = $derived(pendingTool !== null);
   let profileId = $state('');
   let confirmation = $state('');
   let pruneConfirmation = $state('');
@@ -97,13 +99,22 @@
   function closeTools() {
     ticket++;
     toolId = '';
-    loading = false;
+    pendingTool = null;
   }
-  async function query(kind: 'stats' | 'retention_preview' | 'check') {
+  function changeProfile() {
+    retention = null;
+    confirmation = '';
+    if (pendingTool === 'retention_preview') {
+      ticket++;
+      pendingTool = null;
+    }
+  }
+  async function query(kind: Query) {
     if (!selected) return;
     const token = ++ticket;
     const captured = kind === 'retention_preview' ? policyScope : scope;
-    loading = true;
+    const current = () => isCurrent(token, ticket, captured, kind === 'retention_preview' ? policyScope : scope);
+    pendingTool = kind;
     toolError = '';
     toolNotice = '';
     if (kind === 'retention_preview') {
@@ -116,7 +127,7 @@
           ? { op: kind, repository_id: selected.id, profile_id: profileId }
           : { op: kind, repository_id: selected.id },
       );
-      if (!isCurrent(token, ticket, captured, kind === 'retention_preview' ? policyScope : scope)) return;
+      if (!current()) return;
       if (kind === 'check') {
         if (job.state !== 'success')
           throw new Error(job.message || 'Repository check failed. Review activity.');
@@ -133,10 +144,10 @@
         previewAt = Date.now();
       }
     } catch (cause) {
-      if (token === ticket)
+      if (current())
         toolError = cause instanceof Error ? cause.message : 'The query failed. Try again.';
     } finally {
-      if (token === ticket) loading = false;
+      if (token === ticket) pendingTool = null;
     }
   }
   async function apply(event: SubmitEvent) {
@@ -160,7 +171,7 @@
     const captured = scope;
     toolError = '';
     toolNotice = '';
-    loading = true;
+    pendingTool = 'maintenance';
     try {
       const job = await run(operation);
       if (!isCurrent(token, ticket, captured, scope)) return;
@@ -169,11 +180,11 @@
       statistics = null;
       retention = null;
     } catch (cause) {
-      if (token === ticket)
+      if (isCurrent(token, ticket, captured, scope))
         toolError =
           cause instanceof Error ? cause.message : 'Maintenance failed. Review activity before trying again.';
     } finally {
-      if (token === ticket) loading = false;
+      if (token === ticket) pendingTool = null;
     }
   }
   async function prune(event: SubmitEvent) {
@@ -362,12 +373,7 @@
         Profile
         <select
           bind:value={profileId}
-          onchange={() => {
-            ticket++;
-            retention = null;
-            confirmation = '';
-            loading = false;
-          }}
+          onchange={changeProfile}
         >
           {#if !status.config.profiles.some( (profile) => profile.repository_ids.includes(selected!.id) )}<option
               value=""

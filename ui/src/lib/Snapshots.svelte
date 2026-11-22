@@ -65,7 +65,7 @@
       items = newestSnapshots(assertSuccess(job));
       listScope = captured;
     } catch (cause) {
-      if (stamp === ticket)
+      if (isCurrent(stamp, ticket, captured, scope))
         error = cause instanceof Error ? cause.message : 'Snapshots could not be loaded. Try again.';
     } finally {
       if (stamp === ticket) listing = false;
@@ -103,7 +103,7 @@
       nodes = files(assertSuccess(job));
       directoryScope = captured;
     } catch (cause) {
-      if (stamp === ticket)
+      if (isCurrent(stamp, ticket, captured, fileScope))
         error = cause instanceof Error ? cause.message : 'Directory could not be loaded. Try again.';
     } finally {
       if (stamp === ticket) loading = false;

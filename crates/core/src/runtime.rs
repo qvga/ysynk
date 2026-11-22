@@ -341,9 +341,12 @@ impl App {
             return Ok(Value::Null);
         }
         let mut state = self.state.lock().unwrap();
-        Self::expire(&mut state);
+        self.request_locked(&mut state, request)
+    }
+    fn request_locked(self: &Arc<Self>, state: &mut State, request: Request) -> Result<Value> {
+        Self::expire(state);
         if matches!(request, Request::Status) {
-            return self.status(&mut state);
+            return self.status(state);
         }
         ensure!(
             !self.closing.load(Ordering::Acquire),
@@ -394,7 +397,7 @@ impl App {
                 {
                     // Rename may already have committed. Keep memory unchanged,
                     // but never run it again until startup reloads durable data.
-                    Self::persistence_failed(&mut state);
+                    Self::persistence_failed(state);
                     bail!(
                         "Could not durably save configuration; restart the app before continuing"
                     );
@@ -407,7 +410,7 @@ impl App {
                         "Restic executable changed; restart the app to validate its version".into(),
                     );
                 }
-                self.status(&mut state)
+                self.status(state)
             }
             request => {
                 ensure!(
@@ -451,12 +454,12 @@ impl App {
                 {
                     state.attempts.insert(id, now());
                 }
-                if self.persist(&state).is_err() {
+                if self.persist(state).is_err() {
                     state.active = None;
                     state.attempts = previous_attempts;
                     // A post-rename failure may leave a saved active job. On
                     // restart it is conservatively reported as interrupted.
-                    Self::persistence_failed(&mut state);
+                    Self::persistence_failed(state);
                     bail!(
                         "Could not durably save job admission; restart the app before continuing"
                     );
@@ -521,20 +524,17 @@ impl App {
         }
     }
     pub fn tick(self: &Arc<Self>) {
-        let due = {
-            let mut state = self.state.lock().unwrap();
-            Self::expire(&mut state);
-            if state.active.is_some()
-                || state.password_export
-                || self.closing.load(Ordering::Acquire)
-                || state.setup_error.is_some()
-            {
-                return;
-            }
-            due_profile(&state, now())
-        };
-        if let Some(profile_id) = due {
-            let _ = self.request(Request::Backup { profile_id });
+        let mut state = self.state.lock().unwrap();
+        Self::expire(&mut state);
+        if state.active.is_some()
+            || state.password_export
+            || self.closing.load(Ordering::Acquire)
+            || state.setup_error.is_some()
+        {
+            return;
+        }
+        if let Some(profile_id) = due_profile(&state, now()) {
+            let _ = self.request_locked(&mut state, Request::Backup { profile_id });
         }
     }
     pub fn shutdown(&self) {

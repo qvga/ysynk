@@ -493,10 +493,17 @@ pub(crate) fn version(executable: &str) -> Result<String> {
         Some(Duration::from_secs(3)),
     )?;
     successful(&output)?;
-    let s = std::str::from_utf8(&output.bytes)?;
-    let v = s
-        .split_whitespace()
-        .nth(1)
+    parse_version(std::str::from_utf8(&output.bytes)?)
+}
+
+fn parse_version(output: &str) -> Result<String> {
+    let mut words = output.split_whitespace();
+    ensure!(
+        words.next() == Some("restic"),
+        "the selected executable did not identify itself as restic"
+    );
+    let v = words
+        .next()
         .ok_or_else(|| anyhow::anyhow!("unrecognized restic version"))?;
     let parts = v
         .split('.')

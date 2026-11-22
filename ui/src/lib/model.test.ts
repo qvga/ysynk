@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assertSuccess, files, isCurrent, lines, preview, snapshots, snapshotStats } from './model';
+import { assertSuccess, files, isCurrent, lines, newestSnapshots, preview, snapshots, snapshotStats } from './model';
 import type { Job } from './types';
 
 describe('query results', () => {
@@ -29,6 +29,22 @@ describe('query results', () => {
     expect(() => assertSuccess({ state: 'failed', message: 'System keychain is unavailable. Restore access and retry.', result: [] } as unknown as Job)).toThrow('System keychain is unavailable. Restore access and retry.');
     expect(() => assertSuccess({ state: 'success', result: null } as Job)).toThrow('no longer available');
     expect(assertSuccess({ state: 'success', result: [] } as unknown as Job)).toEqual([]);
+  });
+  it('orders snapshots by the instant of backup across host time zones', () => {
+    const entries = [
+      { id: 'unknown', time: 'invalid' },
+      { id: 'earlier', time: '2026-11-03T13:15:00+02:00' },
+      { id: 'later', time: '2026-11-03T07:45:00-05:00' },
+    ];
+    expect(newestSnapshots(entries).map(item => item.id)).toEqual(['later', 'earlier', 'unknown']);
+    expect(entries[0].id).toBe('unknown');
+  });
+
+  it('handles optional snapshot metadata before rendering it', () => {
+    const snapshot = { id: 'old', time: '2026-11-03T12:00:00Z', paths: null, tags: null };
+    expect(snapshots([snapshot])).toEqual([snapshot]);
+    expect(() => snapshots([{ ...snapshot, tags: 'documents' }])).toThrow('invalid');
+    expect(() => snapshots([{ ...snapshot, paths: [null] }])).toThrow('invalid');
   });
   it('preserves literal file paths and requires a server retention token', () => {
     const nodes = [{ type: 'file', name: '[draft]*.txt', path: '/Documents/[draft]*.txt', size: 17 }];

@@ -68,7 +68,7 @@ fn wait(app: &Arc<App>) -> Result<Job> {
         );
         thread::sleep(Duration::from_millis(20));
     }
-    Ok(app.state.lock().unwrap().history[0].clone())
+    Ok(app.state.lock().unwrap().status.history[0].clone())
 }
 fn finish(app: &Arc<App>, request: Request) -> Result<Job> {
     app.request(request)?;
@@ -183,7 +183,7 @@ fn audit_scheduler_selects_oldest_deadline_after_each_completion() -> Result<()>
         &Config::default(),
     )?;
     let mut state = app.state.lock().unwrap();
-    state.config.profiles = [("first", 1), ("second", 3), ("third", 2)]
+    state.status.config.profiles = [("first", 1), ("second", 3), ("third", 2)]
         .into_iter()
         .map(|(id, schedule_minutes)| Profile {
             id: id.into(),
@@ -257,7 +257,7 @@ fn existing_sftp_locators_keep_their_exact_keychain_binding_on_load_and_save() -
         )?;
         let loaded = credentials::required(
             store.as_ref(),
-            &app.state.lock().unwrap().config.repositories[0],
+            &app.state.lock().unwrap().status.config.repositories[0],
         )?;
         assert!(loaded.password == record.password);
         let status = app.request(Request::SaveConfig {
@@ -321,7 +321,7 @@ fn audit_write_failures_block_admission_and_clear_previews() -> Result<()> {
             dir.path().join("locks"),
             &Config::default(),
         )?;
-        app.state.lock().unwrap().setup_error = None;
+        app.state.lock().unwrap().status.setup_error = None;
         app.state.lock().unwrap().previews.insert(
             "stale".into(),
             Preview {
@@ -351,7 +351,7 @@ fn audit_write_failures_block_admission_and_clear_previews() -> Result<()> {
             .is_err()
         );
         assert_eq!(store.state.lock().unwrap().reads, 0);
-        assert_eq!(app.state.lock().unwrap().config.revision, 0);
+        assert_eq!(app.state.lock().unwrap().status.config.revision, 0);
         let disk: Config = serde_json::from_slice(&fs::read(app.directory.join("config.json"))?)?;
         assert_eq!(disk.revision, u64::from(stage == "directory_sync"));
         assert!(
@@ -396,7 +396,7 @@ fn audit_failed_admission_preserves_attempts_and_blocks_retry() -> Result<()> {
         )?;
         {
             let mut state = app.state.lock().unwrap();
-            state.setup_error = None;
+            state.status.setup_error = None;
             state.attempts.insert("profile".into(), 17);
         }
         config::WRITE_FAILURE.with(|fault| fault.set(Some(stage)));
@@ -409,9 +409,10 @@ fn audit_failed_admission_preserves_attempts_and_blocks_retry() -> Result<()> {
         {
             let state = app.state.lock().unwrap();
             assert_eq!(state.attempts["profile"], 17);
-            assert!(state.active.is_none());
+            assert!(state.status.active.is_none());
             assert!(
                 state
+                    .status
                     .setup_error
                     .as_ref()
                     .is_some_and(|s| s.contains("restart"))
@@ -554,8 +555,8 @@ fn audit_completion_write_failure_preserves_outcome_and_blocks_jobs() -> Result<
         )?;
         {
             let mut state = app.state.lock().unwrap();
-            state.setup_error = None;
-            state.active = Some(serde_json::from_value(json!({
+            state.status.setup_error = None;
+            state.status.active = Some(serde_json::from_value(json!({
                 "id":"job", "kind":"backup", "label":"backup", "state":"running", "started_at":1,
                 "profile_id":"profile", "message":"Running", "destinations":[]
             }))?);
@@ -563,11 +564,18 @@ fn audit_completion_write_failure_preserves_outcome_and_blocks_jobs() -> Result<
         config::WRITE_FAILURE.with(|fault| fault.set(Some(stage)));
         app.complete(Ok(json!({"completed":true})));
         let state = app.state.lock().unwrap();
-        assert!(state.active.is_none());
-        assert_eq!(state.history[0].state, "success");
+        assert!(state.status.active.is_none());
+        assert_eq!(state.status.history[0].state, "success");
         assert!(state.attempts["profile"] > 0);
         assert!(state.persistence_failed);
-        assert!(state.setup_error.as_ref().unwrap().contains("restart"));
+        assert!(
+            state
+                .status
+                .setup_error
+                .as_ref()
+                .unwrap()
+                .contains("restart")
+        );
         drop(state);
         app.tick();
         assert!(
@@ -789,13 +797,13 @@ fn password_export_writes_only_a_new_private_file_and_reserves_admission() -> Re
     let task_id = repo.id.clone();
     let task = thread::spawn(move || task_app.export_repository_password(&task_id, 0, task_target));
     entered.wait();
-    app.state.lock().unwrap().config.revision += 1;
+    app.state.lock().unwrap().status.config.revision += 1;
     resume.wait();
     assert!(task.join().unwrap().is_err());
     assert!(!stale_target.exists());
     assert!(!app.is_busy());
     assert!(!app.request(Request::Status)?.to_string().contains(password));
-    assert!(app.state.lock().unwrap().history.is_empty());
+    assert!(app.state.lock().unwrap().status.history.is_empty());
     assert_eq!(store.state.lock().unwrap().writes, 0);
     app.shutdown();
     assert!(
@@ -1114,6 +1122,7 @@ fn real_restic_preserves_literal_paths_and_applies_only_previewed_snapshots() ->
     .unwrap();
     assert_eq!(listing.as_array().unwrap().len(), 2);
     let target = dir.path().join("restore");
+    let reads_before_restore = store.state.lock().unwrap().reads;
     success(
         &app,
         Request::Restore {
@@ -1123,6 +1132,7 @@ fn real_restic_preserves_literal_paths_and_applies_only_previewed_snapshots() ->
             target: target.to_str().unwrap().into(),
         },
     )?;
+    assert_eq!(store.state.lock().unwrap().reads, reads_before_restore + 1);
     let restored = target.join(source.strip_prefix("/")?);
     assert!(restored.join("literal[*]?.txt").is_file());
     assert!(!restored.join("literalx.txt").exists());
@@ -1186,7 +1196,7 @@ fn real_restic_preserves_literal_paths_and_applies_only_previewed_snapshots() ->
 
     // A missing/locked destination never suppresses independent destinations.
     // Completion-relative attempts prevent retry bursts, including all-locked.
-    let mut scheduled = app.state.lock().unwrap().config.clone();
+    let mut scheduled = app.state.lock().unwrap().status.config.clone();
     scheduled.repositories.push(Repository {
         id: "locked".into(),
         label: "Locked fixture".into(),
@@ -1199,12 +1209,13 @@ fn real_restic_preserves_literal_paths_and_applies_only_previewed_snapshots() ->
     app.tick();
     let job = wait(&app)?;
     assert_eq!(job.state, "partial");
+    assert!(job.message.contains("1 failed"));
     assert_eq!(job.destinations[0].state, "success");
     assert_eq!(job.destinations[1].state, "failed");
-    let count = app.state.lock().unwrap().history.len();
+    let count = app.state.lock().unwrap().status.history.len();
     app.tick();
     assert!(!app.is_busy());
-    assert_eq!(app.state.lock().unwrap().history.len(), count);
+    assert_eq!(app.state.lock().unwrap().status.history.len(), count);
     store.state.lock().unwrap().read_error = Some(credentials::LOCKED);
     app.state.lock().unwrap().attempts.remove(&profile.id);
     app.tick();
@@ -1293,7 +1304,7 @@ fn config_rejects_credentials_location_changes_and_stale_revisions() -> Result<(
     c.repositories[0] = repository(dir.path());
     app.request(Request::SaveConfig { config: c.clone() })?;
     assert!(app.request(Request::SaveConfig { config: c }).is_err());
-    let mut changed = app.state.lock().unwrap().config.clone();
+    let mut changed = app.state.lock().unwrap().status.config.clone();
     changed.repositories[0].location = dir.path().join("other").to_str().unwrap().into();
     assert!(
         app.request(Request::SaveConfig { config: changed })
@@ -1403,7 +1414,7 @@ fn keychain_errors_do_not_create_or_replace_credentials() -> Result<()> {
     let mut c = c;
     c.repositories.clear();
     app.request(Request::SaveConfig { config: c })?;
-    let mut c = app.state.lock().unwrap().config.clone();
+    let mut c = app.state.lock().unwrap().status.config.clone();
     let mut moved = repo.clone();
     moved.location = dir.path().join("moved").to_str().unwrap().into();
     c.repositories.push(moved.clone());

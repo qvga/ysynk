@@ -93,6 +93,7 @@ class ReleaseNoticeTests(unittest.TestCase):
                     'name': path.split('/')[-1], 'version': '1', 'license': 'MIT',
                     'repository': 'example/clsx' if path.endswith('/clsx') else {'url': 'https://github.com/example/repo'},
                 }))
+            (root / 'package.json').write_text('{"version":"1.2.3"}')
             (root / 'LICENSE').write_text('exact Rust terms\n')
             metadata = {
                 'workspace_members': ['own'],
@@ -107,6 +108,7 @@ class ReleaseNoticeTests(unittest.TestCase):
             with patch.object(notices, 'ROOT', root):
                 first = notices.generate(metadata, root / 'cache', False)
                 self.assertEqual(first, notices.generate(metadata, root / 'cache', False))
+                self.assertTrue(first.startswith('ysynk 1.2.3 - third-party notices'))
                 self.assertIn('Inventory: 1 Rust packages; 7 JavaScript packages.', first)
                 self.assertIn('\nclsx 1\n', first)
                 self.assertIn('\nesm-env 1\n', first)

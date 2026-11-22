@@ -58,7 +58,7 @@ fn finish(app: &Arc<App>, request: Request) -> Result<Job> {
         );
         thread::sleep(Duration::from_millis(10));
     }
-    Ok(app.state.lock().unwrap().history[0].clone())
+    Ok(app.state.lock().unwrap().status.history[0].clone())
 }
 
 #[test]
@@ -138,6 +138,7 @@ fn real_restic_console_retains_file_activity_only_for_current_session() -> Resul
             .state
             .lock()
             .unwrap()
+            .status
             .history
             .iter()
             .all(|j| j.output.is_empty())
@@ -227,7 +228,7 @@ sys.exit(2)
             );
             thread::sleep(Duration::from_millis(10));
         }
-        let job = app.state.lock().unwrap().history[0].clone();
+        let job = app.state.lock().unwrap().status.history[0].clone();
         assert_eq!(job.state, if cancelled { "cancelled" } else { "failed" });
         assert!(
             job.output
@@ -244,7 +245,7 @@ sys.exit(2)
         assert!(job.output_truncated);
         let record = credentials::required(
             app.credentials.as_ref(),
-            &app.state.lock().unwrap().config.repositories[0],
+            &app.state.lock().unwrap().status.config.repositories[0],
         )?;
         assert!(
             !app.request(Request::Status)?
@@ -320,7 +321,7 @@ os.execv('/usr/bin/restic',['restic']+args)
         );
         thread::sleep(Duration::from_millis(20));
     }
-    assert_eq!(app.state.lock().unwrap().history[0].state, "success");
+    assert_eq!(app.state.lock().unwrap().status.history[0].state, "success");
     assert!(
         live_status,
         "no periodic non-TTY status arrived before exit"

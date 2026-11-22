@@ -106,7 +106,8 @@ export async function verifyAuditUi() {
   await click('Profiles');
   const historyDetails = document.querySelector('.history-output');
   assert(historyDetails && !historyDetails.open, 'Completed output was not collapsed');
-  historyDetails.open = true; await frame();
+  assert(!historyDetails.querySelector('.output-scroll'), 'Collapsed history rendered its output');
+  historyDetails.open = true; await wait(() => historyDetails.querySelector('.output-scroll'));
   assert(historyDetails.querySelector('.output-scroll').textContent.includes(payload), 'Cancelled output was not retained');
   assert(document.querySelector('.activity-row').textContent.includes('cancelled'), 'Cancelled history state missing');
   // Failed jobs use the same history presentation, independent of cancellation.

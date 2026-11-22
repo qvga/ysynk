@@ -1,3 +1,5 @@
+mod destination;
+
 use crate::{
     config,
     credentials::{self, NativeStore, Store},
@@ -5,6 +7,10 @@ use crate::{
     restic,
 };
 use anyhow::{Context, Result, bail, ensure};
+use destination::{
+    password_export_target, pinned_export_target, private_restore_directory, sync_export_parent,
+    trusted_parent,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -18,11 +24,11 @@ use std::{
     thread,
 };
 
-#[derive(Default, Serialize, Deserialize)]
-struct Persisted {
-    history: Vec<Job>,
+#[derive(Serialize, Deserialize)]
+struct Persisted<J = Job> {
+    history: Vec<J>,
     attempts: BTreeMap<String, u64>,
-    active: Option<Job>,
+    active: Option<J>,
 }
 struct Preview {
     expires: u64,
@@ -35,13 +41,9 @@ struct Preview {
 }
 struct State {
     password_export: bool,
-    config: Config,
-    active: Option<Job>,
-    history: Vec<Job>,
+    status: Status,
     attempts: BTreeMap<String, u64>,
     previews: HashMap<String, Preview>,
-    version: Option<String>,
-    setup_error: Option<String>,
     persistence_failed: bool,
 }
 pub struct App {
@@ -106,17 +108,21 @@ impl App {
             "cache must be a private directory, not a symlink"
         );
         let config_path = directory.join("config.json");
-        let config: Config = if config_path.exists() {
+        let config: Config = if config_path.try_exists()? {
             serde_json::from_slice(&config::read(&config_path)?)?
         } else {
             Config::default()
         };
-        config::validate_shape(&config)?;
+        config::validate(&config)?;
         config::validate_overlap(&config, &directory)?;
-        let saved: Persisted = if directory.join("state.json").exists() {
+        let saved: Persisted = if directory.join("state.json").try_exists()? {
             serde_json::from_slice(&config::read(&directory.join("state.json"))?)?
         } else {
-            Persisted::default()
+            Persisted {
+                history: vec![],
+                attempts: BTreeMap::new(),
+                active: None,
+            }
         };
         let mut history = saved.history;
         if let Some(mut interrupted) = saved.active {
@@ -143,13 +149,15 @@ impl App {
             credential_locks,
             state: Mutex::new(State {
                 password_export: false,
-                config,
-                active: None,
-                history,
+                status: Status {
+                    config,
+                    active: None,
+                    history,
+                    restic_version: version,
+                    setup_error,
+                },
                 attempts: saved.attempts,
                 previews: HashMap::new(),
-                version,
-                setup_error,
                 persistence_failed: false,
             }),
             export_finished: Condvar::new(),
@@ -162,30 +170,11 @@ impl App {
         Ok(app)
     }
     fn persist(&self, state: &State) -> Result<()> {
-        let mut history = state.history.clone();
-        for job in &mut history {
-            job.result = None;
-            job.output.clear();
-            job.output_truncated = false;
-        }
-        let mut active = state.active.clone();
-        if let Some(job) = active.as_mut() {
-            job.output.clear();
-            job.output_truncated = false;
-        }
         let saved = Persisted {
-            history,
+            history: state.status.history.iter().map(journal_entry).collect(),
             attempts: state.attempts.clone(),
-            active,
+            active: state.status.active.as_ref().map(journal_entry),
         };
-        let mut saved = serde_json::to_value(saved)?;
-        // Console paths and diagnostics are session-only, including admissions.
-        if let Some(history) = saved["history"].as_array_mut() {
-            for job in history {
-                strip_console(job);
-            }
-        }
-        strip_console(&mut saved["active"]);
         config::write(
             &self.directory.join("state.json"),
             &serde_json::to_vec(&saved)?,
@@ -198,23 +187,13 @@ impl App {
     fn persistence_failed(state: &mut State) {
         state.persistence_failed = true;
         state.previews.clear();
-        state.setup_error = Some(
+        state.status.setup_error = Some(
             "Could not durably save application data; restart the app before continuing".into(),
         );
     }
-    fn status(&self, state: &mut State) -> Result<Value> {
-        Self::expire(state);
-        Ok(serde_json::to_value(Status {
-            config: state.config.clone(),
-            active: state.active.clone(),
-            history: state.history.clone(),
-            restic_version: state.version.clone(),
-            setup_error: state.setup_error.clone(),
-        })?)
-    }
     pub fn is_busy(&self) -> bool {
         let state = self.state.lock().unwrap();
-        state.active.is_some() || state.password_export
+        state.status.active.is_some() || state.password_export
     }
     /// Validate native password-export admission without accessing credentials.
     /// The desktop calls this before opening its trusted native Save dialog.
@@ -242,10 +221,10 @@ impl App {
             "App is shutting down; password export was not completed"
         );
         ensure!(
-            state.config.revision == revision,
+            state.status.config.revision == revision,
             "Configuration changed; reload before exporting a repository password"
         );
-        Self::repository(&state.config, repository_id).map_err(|_| {
+        Self::repository(&state.status.config, repository_id).map_err(|_| {
             anyhow::anyhow!(
                 "Repository is no longer configured; reload before exporting its password"
             )
@@ -264,16 +243,16 @@ impl App {
             let mut state = self.state.lock().unwrap();
             let repo = self.export_selection(&state, repository_id, revision)?;
             ensure!(
-                state.active.is_none() && !state.password_export,
+                state.status.active.is_none() && !state.password_export,
                 "Another operation is running; wait before exporting a repository password"
             );
             state.password_export = true;
-            (repo, state.config.clone(), PasswordExport(self))
+            (repo, state.status.config.clone(), PasswordExport(self))
         };
         let validated_target = password_export_target(&configuration, &self.directory, &target)?;
         // Pin the trusted parent before reading any secret. All subsequent
         // staging, cleanup and publication use this descriptor, not its pathname.
-        let parent_handle = password_export_parent(&target).map_err(|_| anyhow::anyhow!(
+        let parent_handle = trusted_parent(&target).map_err(|_| anyhow::anyhow!(
             "Choose an existing trusted password folder without symlinks; safe password export requires Linux"
         ))?;
         let target = pinned_export_target(&parent_handle, &target)?;
@@ -346,38 +325,42 @@ impl App {
     fn request_locked(self: &Arc<Self>, state: &mut State, request: Request) -> Result<Value> {
         Self::expire(state);
         if matches!(request, Request::Status) {
-            return self.status(state);
+            return Ok(serde_json::to_value(&state.status)?);
         }
         self.ensure_idle(state)?;
         match request {
             Request::SaveConfig { config } => {
                 ensure!(
-                    config.restic_path == state.config.restic_path,
+                    config.restic_path == state.status.config.restic_path,
                     "Choose a restic executable in the native file picker to change it"
                 );
                 self.save_config(state, config)
             }
             request => {
                 ensure!(
-                    state.setup_error.is_none(),
+                    state.status.setup_error.is_none(),
                     "{}",
-                    state.setup_error.as_deref().unwrap_or("restic unavailable")
+                    state
+                        .status
+                        .setup_error
+                        .as_deref()
+                        .unwrap_or("restic unavailable")
                 );
                 let (kind, profile_id, repository_id) = request_scope(&request);
                 if let Some(id) = &repository_id {
                     ensure!(
-                        state.config.repositories.iter().any(|r| &r.id == id),
+                        state.status.config.repositories.iter().any(|r| &r.id == id),
                         "unknown repository"
                     );
                 }
                 if let Some(id) = &profile_id {
                     ensure!(
-                        state.config.profiles.iter().any(|p| &p.id == id),
+                        state.status.config.profiles.iter().any(|p| &p.id == id),
                         "unknown profile"
                     );
                 }
                 let job_id = id();
-                state.active = Some(Job {
+                state.status.active = Some(Job {
                     id: job_id.clone(),
                     kind: kind.into(),
                     label: kind.replace('_', " "),
@@ -400,7 +383,7 @@ impl App {
                     state.attempts.insert(id, now());
                 }
                 if self.persist(state).is_err() {
-                    state.active = None;
+                    state.status.active = None;
                     state.attempts = previous_attempts;
                     // A post-rename failure may leave a saved active job. On
                     // restart it is conservatively reported as interrupted.
@@ -410,7 +393,7 @@ impl App {
                     );
                 }
                 self.cancel.store(false, Ordering::Release);
-                let config = state.config.clone();
+                let config = state.status.config.clone();
                 let app = Arc::clone(self);
                 let mut workers = self.workers.lock().unwrap();
                 for handle in workers.extract_if(.., |h| h.is_finished()) {
@@ -438,7 +421,7 @@ impl App {
             "A repository password export is running; wait for it to finish"
         );
         ensure!(
-            state.active.is_none(),
+            state.status.active.is_none(),
             "another job is running; cancel it and wait for completion"
         );
         Ok(())
@@ -462,10 +445,10 @@ impl App {
         let mut state = self.state.lock().unwrap();
         self.ensure_idle(&state)?;
         ensure!(
-            revision == state.config.revision,
+            revision == state.status.config.revision,
             "configuration changed; select the executable again"
         );
-        let mut config = state.config.clone();
+        let mut config = state.status.config.clone();
         config.restic_path = path
             .to_str()
             .context("Executable path must be valid UTF-8")?
@@ -474,12 +457,12 @@ impl App {
     }
     fn save_config(&self, state: &mut State, mut config: Config) -> Result<Value> {
         ensure!(
-            config.revision == state.config.revision,
+            config.revision == state.status.config.revision,
             "configuration changed; reload before saving"
         );
         config::validate(&config)?;
         config::validate_overlap(&config, &self.directory)?;
-        for old in &state.config.repositories {
+        for old in &state.status.config.repositories {
             if let Some(new) = config.repositories.iter().find(|r| r.id == old.id) {
                 ensure!(
                     old.location == new.location,
@@ -490,7 +473,7 @@ impl App {
         // Save/status never access the keychain. Location binding is
         // checked when each command fetches its credential. Removing
         // configuration deliberately leaves native entries untouched.
-        let changed_path = config.restic_path != state.config.restic_path;
+        let changed_path = config.restic_path != state.status.config.restic_path;
         config.revision = config
             .revision
             .checked_add(1)
@@ -507,22 +490,27 @@ impl App {
             Self::persistence_failed(state);
             bail!("Could not durably save configuration; restart the app before continuing");
         }
-        state.config = config;
+        state.status.config = config;
         state.previews.clear();
         if changed_path {
-            state.version = None;
-            state.setup_error =
+            state.status.restic_version = None;
+            state.status.setup_error =
                 Some("Restic executable changed; restart the app to validate its version".into());
         }
-        self.status(state)
+        Ok(serde_json::to_value(&state.status)?)
     }
     fn complete(&self, outcome: Result<Value>) {
         let mut state = self.state.lock().unwrap();
-        let mut job = state.active.take().unwrap();
+        let mut job = state.status.active.take().unwrap();
         job.finished_at = Some(now());
         if self.cancel.load(Ordering::Acquire) {
             job.state = "cancelled".into();
-            job.message = "Operation cancelled; incomplete restore output is preserved".into();
+            job.message = if job.kind == "restore" {
+                "Restore cancelled. Any incomplete output is preserved."
+            } else {
+                "Operation cancelled."
+            }
+            .into();
         } else {
             match outcome {
                 Ok(value) => {
@@ -543,10 +531,10 @@ impl App {
         {
             state.attempts.insert(id.clone(), now());
         }
-        state.history.insert(0, job);
-        state.history.truncate(100);
+        state.status.history.insert(0, job);
+        state.status.history.truncate(100);
         let mut budget = 0;
-        for job in &mut state.history {
+        for job in &mut state.status.history {
             if let Some(result) = &job.result {
                 budget += serde_json::to_vec(result).map_or(config::LIMIT + 1, |b| b.len());
                 if budget > config::LIMIT {
@@ -563,10 +551,10 @@ impl App {
     pub fn tick(self: &Arc<Self>) {
         let mut state = self.state.lock().unwrap();
         Self::expire(&mut state);
-        if state.active.is_some()
+        if state.status.active.is_some()
             || state.password_export
             || self.closing.load(Ordering::Acquire)
-            || state.setup_error.is_some()
+            || state.status.setup_error.is_some()
         {
             return;
         }
@@ -578,7 +566,7 @@ impl App {
     /// operations' states in completion order.
     pub fn notification_states(&self, cursor: &mut Option<String>) -> Vec<String> {
         let state = self.state.lock().unwrap();
-        let history = &state.history;
+        let history = &state.status.history;
         let count = history
             .iter()
             .position(|job| Some(&job.id) == cursor.as_ref())
@@ -630,6 +618,15 @@ impl App {
     }
     fn run(&self, c: &Config, repo: &Repository, args: &[String]) -> Result<restic::Output> {
         let record = credentials::required(self.credentials.as_ref(), repo)?;
+        self.run_with_credential(c, repo, args, record)
+    }
+    fn run_with_credential(
+        &self,
+        c: &Config,
+        repo: &Repository,
+        args: &[String],
+        record: credentials::Record,
+    ) -> Result<restic::Output> {
         let mut command = restic::command(&c.restic_path);
         command
             .env("RESTIC_REPOSITORY", &repo.location)
@@ -642,7 +639,7 @@ impl App {
             .args(args);
         let operation = args.first().map(String::as_str).unwrap_or("command");
         if operation == "backup"
-            && let Some(job) = self.state.lock().unwrap().active.as_mut()
+            && let Some(job) = self.state.lock().unwrap().status.active.as_mut()
         {
             job.progress = None;
         }
@@ -654,13 +651,13 @@ impl App {
             password: Arc::new(zeroize::Zeroizing::new(record.password.to_string())),
         };
         let mut progress = |progress| {
-            if let Some(job) = self.state.lock().unwrap().active.as_mut() {
+            if let Some(job) = self.state.lock().unwrap().status.active.as_mut() {
                 job.progress = Some(progress);
             }
         };
         let mut callback = |tail: restic::console::Tail| {
             let mut state = self.state.lock().unwrap();
-            if let Some(job) = state.active.as_mut() {
+            if let Some(job) = state.status.active.as_mut() {
                 let mut output = restic::console::Tail {
                     lines: std::mem::take(&mut job.output),
                     truncated: job.output_truncated || tail.truncated,
@@ -704,7 +701,7 @@ impl App {
         Ok(output)
     }
     fn console_line(&self, line: String) {
-        if let Some(job) = self.state.lock().unwrap().active.as_mut() {
+        if let Some(job) = self.state.lock().unwrap().status.active.as_mut() {
             let mut tail = restic::console::Tail {
                 lines: std::mem::take(&mut job.output),
                 truncated: job.output_truncated,
@@ -871,46 +868,40 @@ impl App {
             let mut snapshot_id = None;
             let (state, message) = match outcome {
                 Ok(output) => {
-                    if output.code == 0 {
-                        success += 1;
-                    } else if output.code == 3 {
-                        partial += 1;
-                    }
-                    for line in output.bytes.split(|b| *b == b'\n') {
-                        if let Ok(v) = serde_json::from_slice::<Value>(line)
-                            && v["message_type"] == "summary"
-                        {
-                            snapshot_id = v["snapshot_id"].as_str().map(str::to_owned);
-                            if output.code == 0 {
-                                let bytes = v["total_bytes_processed"].as_u64().unwrap_or(0);
-                                let files = v["total_files_processed"].as_u64().unwrap_or(0);
-                                self.state.lock().unwrap().active.as_mut().unwrap().progress =
-                                    Some(Progress {
-                                        percent: Some(100.0),
-                                        bytes_done: bytes,
-                                        total_bytes: bytes,
-                                        files_done: files,
-                                        total_files: files,
-                                    });
-                            }
+                    let state = match output.code {
+                        0 => {
+                            success += 1;
+                            "success"
+                        }
+                        3 => {
+                            partial += 1;
+                            "partial"
+                        }
+                        _ => "failed",
+                    };
+                    if let Ok(summary) = serde_json::from_slice::<Value>(&output.bytes) {
+                        snapshot_id = summary["snapshot_id"].as_str().map(str::to_owned);
+                        if output.code == 0 {
+                            let bytes = summary["total_bytes_processed"].as_u64().unwrap_or(0);
+                            let files = summary["total_files_processed"].as_u64().unwrap_or(0);
+                            let mut state = self.state.lock().unwrap();
+                            state.status.active.as_mut().unwrap().progress = Some(Progress {
+                                percent: Some(100.0),
+                                bytes_done: bytes,
+                                total_bytes: bytes,
+                                files_done: files,
+                                total_files: files,
+                            });
                         }
                     }
-                    (
-                        if output.code == 0 {
-                            "success"
-                        } else if output.code == 3 {
-                            "partial"
-                        } else {
-                            "failed"
-                        },
-                        restic::exit_message(output.code).to_owned(),
-                    )
+                    (state, restic::exit_message(output.code).to_owned())
                 }
                 Err(error) => ("failed", error.to_string()),
             };
             self.state
                 .lock()
                 .unwrap()
+                .status
                 .active
                 .as_mut()
                 .unwrap()
@@ -923,7 +914,7 @@ impl App {
                 });
         }
         let mut state = self.state.lock().unwrap();
-        let job = state.active.as_mut().unwrap();
+        let job = state.status.active.as_mut().unwrap();
         job.state = if success == profile.repository_ids.len() {
             "success"
         } else if success > 0 || partial > 0 {
@@ -932,11 +923,10 @@ impl App {
             "failed"
         }
         .into();
+        let total = profile.repository_ids.len();
+        let failed = total - success - partial;
         job.message = format!(
-            "{} of {} destinations completed; {} incomplete",
-            success,
-            profile.repository_ids.len(),
-            partial
+            "{success} of {total} destinations completed, {partial} incomplete, {failed} failed."
         );
         Ok(Value::Null)
     }
@@ -1139,9 +1129,8 @@ impl App {
             args.push("--include".into());
             args.push(literal_pattern(path));
         }
-        // Fetch before creating output so a missing/locked keychain leaves no
-        // restore directory. run() fetches again for the actual invocation.
-        drop(credentials::required(self.credentials.as_ref(), repo)?);
+        // Obtain the bound credential before creating any output.
+        let record = credentials::required(self.credentials.as_ref(), repo)?;
         let output_dir = private_restore_directory(Path::new(target))?;
         #[cfg(target_os = "linux")]
         {
@@ -1166,7 +1155,7 @@ impl App {
             bail!("safe descriptor-based restore currently requires Linux");
         }
         let output = self
-            .run(c, repo, &args)
+            .run_with_credential(c, repo, &args, record)
             .context("restore failed; incomplete output is preserved in the requested target")?;
         ensure!(
             output.code == 0,
@@ -1179,14 +1168,27 @@ impl App {
 fn strings(values: &[&str]) -> Vec<String> {
     values.iter().map(|s| (*s).to_owned()).collect()
 }
-fn strip_console(job: &mut Value) {
-    if let Some(job) = job.as_object_mut() {
-        job.remove("output");
-        job.remove("output_truncated");
-    }
+/// The journal has an explicit allowlist so console paths and query results
+/// stay in memory. Serializing this view never clones those larger payloads.
+fn journal_entry(job: &Job) -> Value {
+    json!({
+        "id": job.id,
+        "kind": job.kind,
+        "label": job.label,
+        "state": job.state,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "profile_id": job.profile_id,
+        "repository_id": job.repository_id,
+        "message": job.message,
+        "progress": job.progress,
+        "destinations": job.destinations,
+        "result": null,
+    })
 }
 fn due_profile(state: &State, now: u64) -> Option<String> {
     state
+        .status
         .config
         .profiles
         .iter()
@@ -1205,98 +1207,6 @@ fn due_profile(state: &State, now: u64) -> Option<String> {
         .filter(|(_, deadline)| *deadline <= now)
         .min_by_key(|(_, deadline)| *deadline)
         .map(|(p, _)| p.id.clone())
-}
-fn password_export_target(c: &Config, data: &Path, target: &Path) -> Result<PathBuf> {
-    fn validate(c: &Config, data: &Path, target: &Path) -> Result<PathBuf> {
-        config::absolute(target.to_str().context("invalid path")?)?;
-        let parent = fs::canonicalize(target.parent().context("missing parent")?)?;
-        ensure!(parent.is_dir(), "parent is not a directory");
-        let target = parent.join(target.file_name().context("missing file name")?);
-        match fs::symlink_metadata(&target) {
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            _ => bail!("target already exists or is inaccessible"),
-        }
-        let mut protected = vec![config::resolved(data)?];
-        for repo in c
-            .repositories
-            .iter()
-            .filter_map(|r| config::local_repository(&r.location))
-        {
-            protected.push(config::resolved(repo)?);
-        }
-        for source in c.profiles.iter().flat_map(|p| &p.sources) {
-            protected.push(config::resolved(Path::new(source))?);
-        }
-        ensure!(
-            !protected.iter().any(|path| config::overlaps(path, &target)),
-            "protected export location"
-        );
-        Ok(target)
-    }
-    validate(c, data, target).map_err(|_| anyhow::anyhow!("Choose a new password file in an existing private folder outside app data, repositories, and backup sources; existing files and symlinks are never overwritten"))
-}
-fn sync_export_parent(parent: &File) -> Result<()> {
-    #[cfg(test)]
-    config::write_fault("export_directory_sync")?;
-    parent.sync_all()?;
-    Ok(())
-}
-#[cfg(target_os = "linux")]
-fn password_export_parent(target: &Path) -> Result<File> {
-    use std::{
-        ffi::CString,
-        os::{
-            fd::{AsRawFd, FromRawFd},
-            unix::{ffi::OsStrExt, fs::MetadataExt},
-        },
-    };
-    let mut parent = File::open("/")?;
-    for component in target
-        .parent()
-        .context("missing parent")?
-        .components()
-        .skip(1)
-    {
-        ensure!(
-            matches!(component, std::path::Component::Normal(_)),
-            "invalid parent component"
-        );
-        let name = CString::new(component.as_os_str().as_bytes())?;
-        let fd = unsafe {
-            libc::openat(
-                parent.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        ensure!(fd >= 0, "parent must exist without symlinks");
-        parent = unsafe { File::from_raw_fd(fd) };
-    }
-    let metadata = parent.metadata()?;
-    let trusted_owner = metadata.uid() == 0 || metadata.uid() == unsafe { libc::geteuid() };
-    // As with restore, sticky shared directories protect our owned staging
-    // entry. Same-user processes and root are within the trust boundary.
-    ensure!(
-        trusted_owner && (metadata.mode() & 0o022 == 0 || metadata.mode() & 0o1000 != 0),
-        "untrusted password export parent"
-    );
-    Ok(parent)
-}
-#[cfg(target_os = "linux")]
-fn pinned_export_target(parent: &File, target: &Path) -> Result<PathBuf> {
-    use std::os::fd::AsRawFd;
-    Ok(
-        PathBuf::from(format!("/proc/self/fd/{}", parent.as_raw_fd()))
-            .join(target.file_name().context("missing file name")?),
-    )
-}
-#[cfg(not(target_os = "linux"))]
-fn password_export_parent(_: &Path) -> Result<File> {
-    bail!("safe descriptor-based password export currently requires Linux")
-}
-#[cfg(not(target_os = "linux"))]
-fn pinned_export_target(_: &File, _: &Path) -> Result<PathBuf> {
-    bail!("safe descriptor-based password export currently requires Linux")
 }
 fn repository_config_id(value: &Value) -> Result<String> {
     let id = value["id"]
@@ -1324,15 +1234,14 @@ fn restic_path(path: &str) -> Result<()> {
     Ok(())
 }
 fn literal_pattern(path: &str) -> String {
-    path.chars()
-        .flat_map(|c| {
-            if "*?[]\\".contains(c) {
-                vec!['\\', c]
-            } else {
-                vec![c]
-            }
-        })
-        .collect()
+    let mut pattern = String::with_capacity(path.len());
+    for c in path.chars() {
+        if "*?[]\\".contains(c) {
+            pattern.push('\\');
+        }
+        pattern.push(c);
+    }
+    pattern
 }
 fn request_scope(request: &Request) -> (&'static str, Option<String>, Option<String>) {
     match request {
@@ -1357,70 +1266,6 @@ fn request_scope(request: &Request) -> (&'static str, Option<String>, Option<Str
         Request::Prune { repository_id, .. } => ("prune", None, Some(repository_id.clone())),
         _ => ("invalid", None, None),
     }
-}
-#[cfg(target_os = "linux")]
-fn private_restore_directory(target: &Path) -> Result<File> {
-    use std::{
-        ffi::CString,
-        os::{
-            fd::{AsRawFd, FromRawFd},
-            unix::ffi::OsStrExt,
-        },
-    };
-    let mut parent = File::open("/")?;
-    let components: Vec<_> = target.components().collect();
-    ensure!(
-        components.len() >= 2,
-        "restore target must be a new directory"
-    );
-    for component in &components[1..components.len() - 1] {
-        let name = CString::new(component.as_os_str().as_bytes())?;
-        let fd = unsafe {
-            libc::openat(
-                parent.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        ensure!(fd >= 0, "restore parent must exist and contain no symlinks");
-        parent = unsafe { File::from_raw_fd(fd) };
-    }
-    // The descriptor pins the parent even if an ancestor is renamed. Its
-    // entries must not be replaceable by another user while restic writes.
-    // A trusted sticky directory (such as /tmp) protects our new owned entry.
-    {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = parent.metadata()?;
-        let trusted_owner = metadata.uid() == 0 || metadata.uid() == unsafe { libc::geteuid() };
-        ensure!(
-            trusted_owner && (metadata.mode() & 0o022 == 0 || metadata.mode() & 0o1000 != 0),
-            "restore parent must be owned by this user or root and not writable by others unless sticky"
-        );
-    }
-    let name = CString::new(components.last().unwrap().as_os_str().as_bytes())?;
-    let created = unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) };
-    ensure!(
-        created == 0,
-        "restore output must not already exist, and parent must be writable"
-    );
-    let fd = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    ensure!(
-        fd >= 0,
-        "could not open the newly created restore directory"
-    );
-    // Restic must see a real directory as the final component, not a /proc symlink.
-    drop(unsafe { File::from_raw_fd(fd) });
-    Ok(parent)
-}
-#[cfg(not(target_os = "linux"))]
-fn private_restore_directory(_: &Path) -> Result<File> {
-    bail!("safe descriptor-based restore currently requires Linux")
 }
 
 #[cfg(test)]

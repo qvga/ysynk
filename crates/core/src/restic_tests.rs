@@ -9,6 +9,17 @@ fn sink(password: &str) -> console::Sink {
 }
 
 #[test]
+fn version_probe_checks_the_program_name_and_minimum_version() {
+    assert!(parse_version("restic 0.17.0").is_err());
+    assert!(parse_version("other 1.0.0").is_err());
+    assert!(parse_version("restic").is_err());
+    assert_eq!(
+        parse_version("restic 0.17.1 compiled with go on linux/amd64").unwrap(),
+        "restic 0.17.1"
+    );
+}
+
+#[test]
 fn console_delivers_both_pipes_before_exit_and_drains_trailing_lines() {
     let dir = tempfile::tempdir().unwrap();
     let ack = dir.path().join("ack");

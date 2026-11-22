@@ -4,7 +4,10 @@ use std::{
     fs,
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 pub type Result<T> = std::result::Result<T, String>;
@@ -33,6 +36,12 @@ pub struct Settings {
     pub tray_available: bool,
     pub autostart_supported: bool,
 }
+impl Settings {
+    pub fn start_hidden(&self, login: bool, manual_reopen: bool) -> bool {
+        login && self.start_minimized && self.hide_to_tray && self.tray_available && !manual_reopen
+    }
+}
+
 pub struct Registration {
     pub enabled: bool,
     // Linux restores the exact prior entry if preference persistence fails.
@@ -72,7 +81,7 @@ impl PreferenceStore for FilePreferences {
 }
 pub struct Service {
     preferences: Mutex<Preferences>,
-    closing: std::sync::atomic::AtomicBool,
+    closing: AtomicBool,
     store: Box<dyn PreferenceStore>,
     autostart: Box<dyn Autostart>,
 }
@@ -81,7 +90,7 @@ impl Service {
         // A failed initial read never enables runtime hiding.
         Self {
             preferences: Mutex::new(Preferences::default()),
-            closing: std::sync::atomic::AtomicBool::new(false),
+            closing: AtomicBool::new(false),
             store,
             autostart,
         }
@@ -90,8 +99,7 @@ impl Service {
         *self.preferences.lock().unwrap()
     }
     pub fn close(&self) {
-        self.closing
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.closing.store(true, Ordering::Release);
         // Drain the transaction before the desktop process exits. Subsequent
         // queued settings commands fail after taking the same transaction lock.
         drop(self.preferences.lock().unwrap());
@@ -107,7 +115,7 @@ impl Service {
     }
     pub fn get(&self, tray: bool) -> Result<Settings> {
         let mut runtime = self.preferences.lock().unwrap();
-        if self.closing.load(std::sync::atomic::Ordering::Acquire) {
+        if self.closing.load(Ordering::Acquire) {
             return Err("ysynk is shutting down; desktop settings are unavailable.".into());
         }
         let preferences = self.store.load()?;
@@ -117,7 +125,7 @@ impl Service {
     }
     pub fn save(&self, input: Input, tray: bool) -> Result<Settings> {
         let mut runtime = self.preferences.lock().unwrap();
-        if self.closing.load(std::sync::atomic::Ordering::Acquire) {
+        if self.closing.load(Ordering::Acquire) {
             return Err("ysynk is shutting down; desktop settings were not changed.".into());
         }
         if input.start_minimized && !input.hide_to_tray {
@@ -231,6 +239,9 @@ impl XdgAutostart {
             .and_then(|exec| exec.strip_suffix(" --autostart"))
             .ok_or_else(|| LOGIN_ERROR.to_owned())?;
         if !safe_executable(Path::new(executable))
+            || fields
+                .get("DBusActivatable")
+                .is_some_and(|value| *value != "false")
             || [
                 "OnlyShowIn",
                 "NotShowIn",
@@ -362,14 +373,6 @@ pub fn safe_executable(path: &Path) -> bool {
                     || (cfg!(windows) && b"\\:".contains(&b))
             })
         })
-}
-pub fn start_hidden(
-    login: bool,
-    preferences: Preferences,
-    tray: bool,
-    manual_reopen: bool,
-) -> bool {
-    login && preferences.start_minimized && preferences.hide_to_tray && tray && !manual_reopen
 }
 pub fn is_login_launch(arguments: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>) -> bool {
     arguments

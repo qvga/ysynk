@@ -19,6 +19,9 @@ impl Tail {
                 end -= 1;
             }
             line.truncate(end);
+            // Each completed job retains its tail. Release the original long
+            // record's allocation along with the discarded bytes.
+            line.shrink_to_fit();
             self.truncated = true;
         }
         if line.is_empty() {

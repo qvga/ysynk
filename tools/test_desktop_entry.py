@@ -1,4 +1,5 @@
 import importlib.util
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -48,6 +49,14 @@ class DesktopEntryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'unmanaged desktop entry'):
             desktop_entry.install(self.executable, self.data_home)
         self.assertEqual(destination.read_text(), original)
+
+    def test_existing_fifo_is_rejected_without_opening_a_writer(self):
+        destination = self.data_home / 'applications/ysynk.desktop'
+        destination.parent.mkdir(parents=True)
+        os.mkfifo(destination)
+        with self.assertRaisesRegex(ValueError, 'regular file'):
+            desktop_entry.install(self.executable, self.data_home)
+        self.assertTrue(destination.is_fifo())
 
     def test_desktop_entry_symlinks_are_not_replaced(self):
         destination = self.data_home / 'applications/ysynk.desktop'

@@ -19,7 +19,7 @@ describe('navigation and operation history', () => {
   });
 
   it('shows an explicit empty operation history', () => {
-    const { body } = render(Activity, { props: { jobs: [], repositories: [] } });
+    const { body } = render(Activity, { props: { jobs: [], config: { profiles: [], repositories: [] } } });
     expect(body).toContain('No completed operations.');
   });
 
@@ -34,21 +34,23 @@ describe('navigation and operation history', () => {
         { repository_id: 'remote', state: 'failed', message: 'System keychain is locked.', snapshot_id: null },
       ],
     };
-    const { body } = render(Activity, { props: { jobs: [job], repositories: [{ id: 'local', label: 'Local disk', location: '/backup' }] } });
+    const { body } = render(Activity, { props: { jobs: [job], config: { profiles: [], repositories: [{ id: 'local', label: 'Local disk', location: '/backup' }] } } });
     for (const evidence of ['partial', 'success', 'failed', 'Local disk', 'remote', 'abcdef123456', 'System keychain is locked.']) {
       expect(body).toContain(evidence);
     }
     expect(body).toContain('<summary>Command output</summary>');
     expect(body).not.toMatch(/<details[^>]*\sopen/);
+    expect(body).not.toContain('onerror');
+    expect(body).not.toContain('class="output-scroll"');
+  });
+
+  it('renders retained output as literal text when opened', () => {
+    const { body } = render(CommandOutput, {
+      props: { output: ['<img src=x onerror=alert(1)>'], truncated: true },
+    });
     expect(body).toContain('&lt;img src=x onerror=alert(1)>');
     expect(body).not.toContain('<img');
     expect(body).toContain('200 lines / 64 KiB');
-  });
-
-  it.each(['success', 'failed', 'cancelled'])('keeps command output for a %s operation', state => {
-    const job = { id: state, state, started_at: 1793664000, destinations: [], output: ['saved output'], output_truncated: false } as unknown as Job;
-    const { body } = render(Activity, { props: { jobs: [job], repositories: [] } });
-    expect(body).toContain('saved output');
     expect(body).toContain('Output is available for this session only.');
   });
 

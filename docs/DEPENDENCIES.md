@@ -1,69 +1,41 @@
 # Dependencies
 
-Exact dependency versions and integrity records are in the manifests and
-lockfiles. Rust, Svelte 5 and Tauri 2 form the application; external restic owns
-the backup format, encryption, transport and repository locking.
+ysynk uses Rust for the backup engine, Svelte 5 for the interface and Tauri 2 for the desktop application. Cargo and npm lockfiles pin the dependencies used to build it. The installed restic executable, GTK, WebKitGTK and the desktop keychain are system dependencies. Update them through the operating system.
 
-Native credential libraries provide persistent Secret Service on Linux,
-Keychain on macOS and Credential Manager on Windows. Backend features must be
-explicit: a library's mock/default or kernel-only fallback is not acceptable
-for production secrets.
-
-Linux deliberately disables the Secret Service library's optional crypto
-features and uses Plain sessions on a trusted local user bus. Version 4.1.0's
-DH private keys and CBC IVs use non-cryptographic randomness; enabling either
-crypto backend is not an acceptable fix. See the transport boundary in
-[security](SECURITY.md).
+Linux credential storage uses the persistent Secret Service collection over a trusted local user bus. The pinned `dbus-secret-service` 4.1.0 library uses non-cryptographic randomness for its optional Diffie–Hellman private key and IV generation. ysynk disables those features and uses Plain sessions. Native credential backends are selected explicitly. Mock, kernel-only and plaintext stores are excluded from production credential storage. [Credential boundary](SECURITY.md#credential-boundary)
 
 ## Retained source fixes
 
-- `vendor/glib`: true version 0.18.5, with the official mutable-output-pointer
-  backport for VariantStrIter. See [provenance](../vendor/GLIB_BACKPORT.md).
-- `vendor/deepmerge`: true version 4.3.1, with the project-maintained own-data-
-  property fix in source and distributions. See
-  [provenance](../vendor/DEEPMERGE_BACKPORT.md).
+| Dependency | Local change | Verification |
+| --- | --- | --- |
+| GLib 0.18.5 | The official fix for the output pointer in `VariantStrIter`, plus syntax changes for compiler warnings. Cargo selects this copy for the GTK dependency chain. | [Patch, checksums and iterator tests](../vendor/GLIB_BACKPORT.md) |
+| deepmerge 4.3.1 | Object merges define own data properties, including for keys named `__proto__`. npm selects the patched code for the Svelte plugin. | [Patch, checksums and merge tests](../vendor/DEEPMERGE_BACKPORT.md) |
 
-These are not upstream-supported patched releases. The raw advisory report
-retains version findings; passing source checks is not a clean-advisory claim
-or independent audit. `python3 tools/check-backports.py` checks retained bytes
-and selection; `npm run test:dependencies` checks real plugin resolution and
-merge regressions. Re-run `tools/check_advisories.py` after lockfile changes.
-Network failure means unavailable, not zero findings.
+Both copies retain their published upstream versions. ysynk maintains these backports until the dependency graph can use suitable upstream releases. From the repository root, check the reviewed source bytes and the plugin's installed dependency with these commands.
 
-The advisory inventory uses upstream npm names for aliases. Each installed
-package must provide a name and version. Each local link must resolve to a
-manifest inside the checkout with a name and version matching its lockfile
-target. Incomplete inventories stop the scan before it queries OSV.
+```sh
+python3 tools/check-backports.py
+npm run test:dependencies
+```
 
-On November 22, 2026, OSV returned findings for six of 575 locked packages.
-The two GLib identifiers refer to the same iterator issue covered by the verified
-backport. Five packages have maintenance advisories. These include `chrono`
-0.4.45, which is present in the lockfile and absent from the active Linux
-x86-64 workspace dependency tree. The scan included the local deepmerge
-package and returned no advisory for its version. Its source fix and regression
-checks remain in place. [GLib advisory](https://osv.dev/vulnerability/GHSA-wrw7-89jp-8q8g)
-and [chrono advisory](https://rustsec.org/advisories/RUSTSEC-2026-0543.html).
+### Advisory checks
 
-The single-instance plugin currently uses zbus 5. Its standalone `zbus_names`,
-`zvariant` and `zvariant_derive` dependencies have unmaintained-package
-advisories (RUSTSEC-2026-0371, RUSTSEC-2026-0370 and RUSTSEC-2026-0372) because
-they were merged into zbus 6. They remain in the pinned plugin's dependency
-graph; the raw report retains these findings, alongside `proc-macro-error`'s
-unmaintained-package advisory. Updating that plugin to a zbus-6-based release
-is separate dependency maintenance, not a suppressed finding.
+After a lockfile change, run the public OSV query and review the resulting diff.
 
-External restic and its compiled Go runtime are not covered by Cargo/npm
-lockfile checks. `docs/audit-runtime-advisories.json` records the audit host's
-version-only results, not verified reachable vulnerabilities or an inventory
-of every installation. Keep the system restic package and its compiler/runtime
-security updates current; evaluate distribution backports before interpreting
-version matches. This audit did not change system packages.
+```sh
+python3 tools/check_advisories.py --output docs/advisories.json
+```
+
+The scanner queries public package names and pinned versions. It resolves npm aliases to upstream names and verifies linked packages against their local manifests. Incomplete npm records, partial API responses and network failures stop the scan. Exit status `0` means the query completed with no matches, `1` means matches were recorded, and `2` means the check was unavailable. Version matches stay in the report even when a local patch addresses them. Source verification and regression tests establish what shipped.
+
+The November 22, 2026 scan returned matches for six of 575 packages. [Full lockfile report](advisories.json)
+
+- **GLib.** The two identifiers refer to the same iterator issue, covered by the verified backport. The scan also included deepmerge and returned no match for its version. [GLib advisory](https://osv.dev/vulnerability/GHSA-wrw7-89jp-8q8g)
+- **Maintenance advisories.** `proc-macro-error` and `chrono` carry unmaintained-package advisories. `chrono` 0.4.45 appears in the lockfile but was absent from the active Linux x86-64 build graph at review time. The other three findings concern `zbus_names`, `zvariant` and `zvariant_derive` in the single-instance plugin's zbus 5 dependency tree. They were merged into zbus 6. Moving to the newer stack requires a compatible plugin. [chrono advisory](https://rustsec.org/advisories/RUSTSEC-2026-0543.html)
+- **System restic.** A separate November 3, 2026 snapshot records version matches for restic and the Go runtime on the audit host. Evaluate the installed binary, distribution backports and reachable code before drawing conclusions about another machine. [Runtime report](audit-runtime-advisories.json)
 
 ## Notices
 
-ysynk remains Apache-2.0. External restic retains its BSD 2-Clause notice in
-`docs/RESTIC-LICENSE`. `python3 tools/release-notices.py` creates an intentionally
-overinclusive locked Linux Cargo/JavaScript notice inventory. Missing notices
-block packaging; `--fetch-missing` explicitly prepares an upstream cache when
-needed. Packages include the application license, restic notice and third-party
-inventory. Distribution still requires platform and license review.
+ysynk ships under Apache-2.0. The Linux packages include the ysynk license, restic's BSD 2-Clause notice and a third-party notice inventory. The inventory includes build and development dependencies from the locked Linux Cargo graph and the specified JavaScript packages. It deliberately covers more code than the final executable links. [ysynk license](../LICENSE) · [restic license](RESTIC-LICENSE)
+
+Packaging runs `python3 tools/release-notices.py` and stops if required notices are missing. Use `--fetch-missing` to prepare the pinned upstream notice cache. Review distribution and platform obligations when changing dependencies. [Packaging instructions](../CONTRIBUTING.md#build-release-assets)

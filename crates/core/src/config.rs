@@ -95,9 +95,6 @@ fn unique<'a>(ids: impl Iterator<Item = &'a str>) -> Result<()> {
     Ok(())
 }
 pub(crate) fn validate(c: &Config) -> Result<()> {
-    validate_shape(c)
-}
-pub(crate) fn validate_shape(c: &Config) -> Result<()> {
     ensure!(
         serde_json::to_vec(c)?.len() <= 1024 * 1024,
         "configuration too large"
@@ -191,11 +188,18 @@ pub(crate) fn local_repository(location: &str) -> Option<&Path> {
     }
 }
 pub(crate) fn resolved(path: &Path) -> Result<std::path::PathBuf> {
-    if path.exists() {
-        return Ok(fs::canonicalize(path)?);
+    // A new repository or restore directory can have missing components.
+    // Resolve its existing ancestor first. Errors other than a missing path
+    // must reach the overlap check instead of being treated as missing.
+    for ancestor in path.ancestors() {
+        match fs::canonicalize(ancestor) {
+            Ok(base) if ancestor == path => return Ok(base),
+            Ok(base) => return Ok(base.join(path.strip_prefix(ancestor)?)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
     }
-    let parent = path.parent().context("path has no existing ancestor")?;
-    Ok(resolved(parent)?.join(path.file_name().context("path has no name")?))
+    anyhow::bail!("path has no existing ancestor")
 }
 pub(crate) fn overlaps(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
@@ -228,4 +232,22 @@ pub(crate) fn validate_overlap(c: &Config, data: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_missing_components_but_report_invalid_ancestors() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let base = dir.path().canonicalize()?;
+        let missing = dir.path().join("new/repository");
+        assert_eq!(resolved(&missing)?, base.join("new/repository"));
+        let regular = dir.path().join("document");
+        fs::write(&regular, [])?;
+        assert!(resolved(&regular)?.is_file());
+        assert!(resolved(&regular.join("repository")).is_err());
+        Ok(())
+    }
 }

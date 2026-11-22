@@ -76,15 +76,14 @@ fn only_login_launches_with_valid_tray_preferences_start_hidden() {
                 for tray in [false, true] {
                     for manual in [false, true] {
                         assert_eq!(
-                            start_hidden(
-                                login,
-                                Preferences {
-                                    start_minimized: minimized,
-                                    hide_to_tray: hide
-                                },
-                                tray,
-                                manual
-                            ),
+                            Settings {
+                                start_at_login: login,
+                                start_minimized: minimized,
+                                hide_to_tray: hide,
+                                tray_available: tray,
+                                autostart_supported: true,
+                            }
+                            .start_hidden(login, manual),
                             login && minimized && hide && tray && !manual
                         );
                     }
@@ -304,6 +303,14 @@ fn stale_xdg_registration_is_reported_and_preserved() {
     adapter.set_enabled(true).unwrap();
     let path = adapter.path().unwrap();
     let original = fs::read(&path).unwrap();
+    // A desktop may bypass Exec when D-Bus activation is requested.
+    let external = [original.as_slice(), b"DBusActivatable=true\n"].concat();
+    fs::write(&path, &external).unwrap();
+    assert!(adapter.enabled().is_err());
+    assert!(adapter.set_enabled(false).is_err());
+    assert_eq!(fs::read(&path).unwrap(), external);
+
+    fs::write(&path, &original).unwrap();
     adapter.executable = PathBuf::from("/opt/current/ysynk");
     assert!(adapter.set_enabled(false).is_err());
     assert!(adapter.set_enabled(true).is_err());

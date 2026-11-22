@@ -537,6 +537,31 @@ impl App {
             let _ = self.request_locked(&mut state, Request::Backup { profile_id });
         }
     }
+    /// Advance a desktop notification cursor and return newly completed
+    /// operations' states in completion order.
+    pub fn notification_states(&self, cursor: &mut Option<String>) -> Vec<String> {
+        let state = self.state.lock().unwrap();
+        let history = &state.history;
+        let count = history
+            .iter()
+            .position(|job| Some(&job.id) == cursor.as_ref())
+            .unwrap_or(history.len());
+        if count == 0 {
+            return Vec::new();
+        }
+        *cursor = Some(history[0].id.clone());
+        history[..count]
+            .iter()
+            .rev()
+            .filter(|job| {
+                matches!(
+                    job.kind.as_str(),
+                    "backup" | "restore" | "check" | "apply_retention" | "prune"
+                )
+            })
+            .map(|job| job.state.clone())
+            .collect()
+    }
     pub fn shutdown(&self) {
         // Admission holds state then workers; keep the same lock order, releasing state before joins.
         let state = self.state.lock().unwrap();

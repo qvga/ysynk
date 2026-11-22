@@ -356,6 +356,9 @@ fn main() {
                 .map(std::path::PathBuf::from)
                 .unwrap_or(app.path().app_local_data_dir()?.join("restic"));
             let core = App::open(directory.clone())?;
+            let mut notification_cursor = None;
+            // Skip completions restored from disk before admitting any new work.
+            core.notification_states(&mut notification_cursor);
             let settings = settings::Service::new(Box::new(settings::FilePreferences(directory.join("desktop-settings.json"))), login_store(app.handle(), data_override));
             app.manage(Desktop { core: core.clone(), settings, tray_created: AtomicBool::new(false), hidden_to_tray: AtomicBool::new(false), manual_reopen: manual_reopen.clone(), shutting_down: AtomicBool::new(false), drained: AtomicBool::new(false), exporting_password: Arc::new(AtomicBool::new(false)) });
             // Creation is not proof that a desktop tray host is visible. The
@@ -374,8 +377,6 @@ fn main() {
             }
             let handle = app.handle().clone();
             std::thread::spawn(move || {
-                let mut observed = std::collections::HashSet::<String>::new();
-                let mut initialized = false;
                 while !handle.state::<Desktop>().shutting_down.load(Ordering::Relaxed) {
                     // If a tray host disappears, a hidden app must become
                     // reachable again. Never hide later when a host appears.
@@ -383,19 +384,8 @@ fn main() {
                         show(&handle);
                     }
                     core.tick();
-                    if let Ok(status) = core.request(Request::Status) {
-                        if let Some(jobs) = status["history"].as_array() {
-                            let mut current = std::collections::HashSet::new();
-                            for job in jobs.iter().rev() {
-                                let id = job["id"].as_str().unwrap_or_default();
-                                if initialized && !observed.contains(id) && matches!(job["kind"].as_str(), Some("backup" | "restore" | "check" | "apply_retention" | "prune")) {
-                                    notify(job["state"].as_str().unwrap_or("failed"));
-                                }
-                                current.insert(id.to_owned());
-                            }
-                            observed = current;
-                        }
-                        initialized = true;
+                    for state in core.notification_states(&mut notification_cursor) {
+                        notify(&state);
                     }
                     std::thread::sleep(std::time::Duration::from_secs(1));
                 }

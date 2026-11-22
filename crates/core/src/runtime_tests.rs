@@ -75,6 +75,8 @@ fn real_restic_console_retains_file_activity_only_for_current_session() -> Resul
         .state,
         "success"
     );
+    let mut notification_cursor = None;
+    assert!(app.notification_states(&mut notification_cursor).is_empty());
     let backup = finish(
         &app,
         Request::Backup {
@@ -95,6 +97,12 @@ fn real_restic_console_retains_file_activity_only_for_current_session() -> Resul
         },
     )?;
     assert_eq!(query.state, "success");
+    assert_eq!(
+        app.notification_states(&mut notification_cursor),
+        ["success"]
+    );
+    assert_eq!(notification_cursor.as_ref(), Some(&query.id));
+    assert!(app.notification_states(&mut notification_cursor).is_empty());
     assert!(
         !query
             .output

@@ -5,7 +5,7 @@ resolver = "3"
 exclude = ["vendor/glib"]
 
 [workspace.package]
-version = "0.5.3"
+version = "0.5.4"
 license = "Apache-2.0"
 edition = "2024"
 rust-version = "1.91"

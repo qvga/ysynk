@@ -35,8 +35,7 @@ pub struct Settings {
 }
 pub struct Registration {
     pub enabled: bool,
-    // Linux restores the exact prior entry, including a previous executable,
-    // rather than repointing it when preference persistence fails.
+    // Linux restores the exact prior entry if preference persistence fails.
     pub bytes: Option<Vec<u8>>,
 }
 pub trait Autostart: Send + Sync {
@@ -112,10 +111,7 @@ impl Service {
             return Err("ysynk is shutting down; desktop settings are unavailable.".into());
         }
         let preferences = self.store.load()?;
-        let enabled = self
-            .autostart
-            .enabled()
-            .map_err(|_| LOGIN_ERROR.to_owned())?;
+        let enabled = self.autostart.enabled()?;
         *runtime = preferences;
         Ok(self.settings(preferences, enabled, tray))
     }
@@ -133,10 +129,7 @@ impl Service {
         {
             return Err("No usable tray host is available. Keep the window visible and retry after checking the desktop tray.".into());
         }
-        let before = self
-            .autostart
-            .checkpoint()
-            .map_err(|_| LOGIN_ERROR.to_owned())?;
+        let before = self.autostart.checkpoint()?;
         let changed = before.enabled != input.start_at_login;
         if changed && input.start_at_login && !self.autostart.supported() {
             return Err("Start at login is unavailable for this launch. Use a normal installed executable without a data-directory override or unsafe path characters.".into());
@@ -206,7 +199,7 @@ impl XdgAutostart {
             .map(|path| path.join("autostart/ysynk.desktop"))
             .ok_or_else(|| "Could not locate the desktop-login configuration folder.".into())
     }
-    fn inspect(bytes: &[u8]) -> Result<bool> {
+    fn inspect(&self, bytes: &[u8]) -> Result<bool> {
         use std::collections::HashMap;
         let text = std::str::from_utf8(bytes).map_err(|_| LOGIN_ERROR.to_owned())?;
         let mut fields = HashMap::new();
@@ -250,6 +243,9 @@ impl XdgAutostart {
         {
             return Err("The ysynk login entry was changed outside the app and cannot be verified. Inspect it in your desktop login settings before retrying.".into());
         }
+        if Path::new(executable) != self.executable {
+            return Err("The login entry points to a different executable. Move ysynk.desktop out of your autostart folder, then reload settings and enable Start at login for this installation.".into());
+        }
         for key in ["Hidden", "X-GNOME-Autostart-enabled"] {
             if fields
                 .get(key)
@@ -274,7 +270,7 @@ impl Autostart for XdgAutostart {
         let bytes = bounded_read(&self.path()?).map_err(|_| LOGIN_ERROR.to_owned())?;
         let enabled = bytes
             .as_deref()
-            .map(Self::inspect)
+            .map(|bytes| self.inspect(bytes))
             .transpose()?
             .unwrap_or(false);
         Ok(Registration { enabled, bytes })
@@ -306,6 +302,9 @@ impl Autostart for XdgAutostart {
     }
     fn restore(&self, registration: &Registration) -> Result<()> {
         let path = self.path()?;
+        // The entry may have changed externally while the preferences were saved.
+        // Apply the same identity check used before a normal registration change.
+        let _ = self.checkpoint()?;
         if let Some(bytes) = &registration.bytes {
             atomic_write(&path, bytes)
                 .map_err(|_| "Could not restore desktop-login registration.".into())

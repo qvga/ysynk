@@ -66,7 +66,7 @@ describe('startup settings', () => {
       config: { revision: 0, restic_path: '/usr/bin/restic', repositories: [], profiles: [] },
       active: null, history: [], restic_version: 'restic 0.18.1', setup_error: null,
     };
-    const { body } = render(Preferences, { props: { status, busy: false, save: async () => null, theme: 'system', changeTheme: () => {} } });
+    const { body } = render(Preferences, { props: { status, busy: false, selectEngine: async () => {}, theme: 'system', changeTheme: () => {} } });
     expect(body).toContain('Loading startup settings…');
     expect(body).not.toContain('type="checkbox"');
     expect(body).not.toContain('Save startup settings');

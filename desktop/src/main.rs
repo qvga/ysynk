@@ -24,11 +24,20 @@ struct Desktop {
     manual_reopen: Arc<AtomicBool>,
     shutting_down: AtomicBool,
     drained: AtomicBool,
-    exporting_password: Arc<AtomicBool>,
+    file_dialog_open: Arc<AtomicBool>,
 }
 
-struct PasswordExportGuard(Arc<AtomicBool>);
-impl Drop for PasswordExportGuard {
+struct FileDialogGuard(Arc<AtomicBool>);
+impl FileDialogGuard {
+    fn acquire(state: &Desktop) -> Result<Self, String> {
+        state
+            .file_dialog_open
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "Another native file dialog is already open.".to_owned())?;
+        Ok(Self(state.file_dialog_open.clone()))
+    }
+}
+impl Drop for FileDialogGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
     }
@@ -48,11 +57,7 @@ async fn export_repository_password(
     if state.shutting_down.load(Ordering::Acquire) {
         return Err("ysynk is shutting down; password export was not completed.".into());
     }
-    state
-        .exporting_password
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .map_err(|_| "A repository password export dialog is already open.".to_owned())?;
-    let guard = PasswordExportGuard(state.exporting_password.clone());
+    let guard = FileDialogGuard::acquire(&state)?;
     let core = state.core.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = guard;
@@ -91,6 +96,50 @@ async fn export_repository_password(
     .map_err(|_| {
         "Password export could not finish; inspect the selected folder before retrying.".to_owned()
     })?
+}
+
+#[tauri::command]
+async fn select_restic_executable(
+    revision: u64,
+    window: tauri::WebviewWindow,
+    handle: tauri::AppHandle,
+    state: tauri::State<'_, Desktop>,
+) -> Result<Option<serde_json::Value>, String> {
+    settings_caller(&window)?;
+    if state.shutting_down.load(Ordering::Acquire) {
+        return Err("ysynk is shutting down.".into());
+    }
+    let guard = FileDialogGuard::acquire(&state)?;
+    let core = state.core.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        let Some(selected) = handle
+            .dialog()
+            .file()
+            .set_parent(&window)
+            .set_title(
+                "Choose the trusted restic executable that will receive repository passwords",
+            )
+            .blocking_pick_file()
+        else {
+            return Ok(None);
+        };
+        let path = selected
+            .into_path()
+            .map_err(|_| "Select a local executable.".to_owned())?;
+        if handle
+            .state::<Desktop>()
+            .shutting_down
+            .load(Ordering::Acquire)
+        {
+            return Err("ysynk is shutting down.".into());
+        }
+        core.set_restic_executable(revision, &path)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|_| "Could not finish selecting the restic executable.".to_owned())?
 }
 
 #[tauri::command]
@@ -360,7 +409,7 @@ fn main() {
             // Skip completions restored from disk before admitting any new work.
             core.notification_states(&mut notification_cursor);
             let settings = settings::Service::new(Box::new(settings::FilePreferences(directory.join("desktop-settings.json"))), login_store(app.handle(), data_override));
-            app.manage(Desktop { core: core.clone(), settings, tray_created: AtomicBool::new(false), hidden_to_tray: AtomicBool::new(false), manual_reopen: manual_reopen.clone(), shutting_down: AtomicBool::new(false), drained: AtomicBool::new(false), exporting_password: Arc::new(AtomicBool::new(false)) });
+            app.manage(Desktop { core: core.clone(), settings, tray_created: AtomicBool::new(false), hidden_to_tray: AtomicBool::new(false), manual_reopen: manual_reopen.clone(), shutting_down: AtomicBool::new(false), drained: AtomicBool::new(false), file_dialog_open: Arc::new(AtomicBool::new(false)) });
             // Creation is not proof that a desktop tray host is visible. The
             // user must explicitly opt in after checking the native menu.
             if setup_tray(app).is_err() {
@@ -392,7 +441,7 @@ fn main() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![request, export_repository_password, get_desktop_settings, save_desktop_settings, quit])
+        .invoke_handler(tauri::generate_handler![request, select_restic_executable, export_repository_password, get_desktop_settings, save_desktop_settings, quit])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let state = window.state::<Desktop>();

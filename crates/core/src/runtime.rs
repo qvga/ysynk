@@ -348,69 +348,14 @@ impl App {
         if matches!(request, Request::Status) {
             return self.status(state);
         }
-        ensure!(
-            !self.closing.load(Ordering::Acquire),
-            "app is shutting down"
-        );
-        ensure!(
-            !state.persistence_failed,
-            "Could not durably save application data; restart the app before continuing"
-        );
-        ensure!(
-            !state.password_export,
-            "A repository password export is running; wait for it to finish"
-        );
-        ensure!(
-            state.active.is_none(),
-            "another job is running; cancel it and wait for completion"
-        );
+        self.ensure_idle(state)?;
         match request {
-            Request::SaveConfig { mut config } => {
+            Request::SaveConfig { config } => {
                 ensure!(
-                    config.revision == state.config.revision,
-                    "configuration changed; reload before saving"
+                    config.restic_path == state.config.restic_path,
+                    "Choose a restic executable in the native file picker to change it"
                 );
-                config::validate(&config)?;
-                config::validate_overlap(&config, &self.directory)?;
-                for old in &state.config.repositories {
-                    if let Some(new) = config.repositories.iter().find(|r| r.id == old.id) {
-                        ensure!(
-                            old.location == new.location,
-                            "Repository location cannot change for an existing ID; use a new repository ID"
-                        );
-                    }
-                }
-                // Save/status never access the keychain. Location binding is
-                // checked when each command fetches its credential. Removing
-                // configuration deliberately leaves native entries untouched.
-                let changed_path = config.restic_path != state.config.restic_path;
-                config.revision = config
-                    .revision
-                    .checked_add(1)
-                    .context("configuration revision overflow")?;
-                if config::write(
-                    &self.directory.join("config.json"),
-                    &serde_json::to_vec(&config)?,
-                    true,
-                )
-                .is_err()
-                {
-                    // Rename may already have committed. Keep memory unchanged,
-                    // but never run it again until startup reloads durable data.
-                    Self::persistence_failed(state);
-                    bail!(
-                        "Could not durably save configuration; restart the app before continuing"
-                    );
-                }
-                state.config = config;
-                state.previews.clear();
-                if changed_path {
-                    state.version = None;
-                    state.setup_error = Some(
-                        "Restic executable changed; restart the app to validate its version".into(),
-                    );
-                }
-                self.status(state)
+                self.save_config(state, config)
             }
             request => {
                 ensure!(
@@ -478,6 +423,98 @@ impl App {
                 Ok(json!({"job_id": job_id}))
             }
         }
+    }
+    fn ensure_idle(&self, state: &State) -> Result<()> {
+        ensure!(
+            !self.closing.load(Ordering::Acquire),
+            "app is shutting down"
+        );
+        ensure!(
+            !state.persistence_failed,
+            "Could not durably save application data; restart the app before continuing"
+        );
+        ensure!(
+            !state.password_export,
+            "A repository password export is running; wait for it to finish"
+        );
+        ensure!(
+            state.active.is_none(),
+            "another job is running; cancel it and wait for completion"
+        );
+        Ok(())
+    }
+    /// Only the native file picker supplies this path. Renderer configuration
+    /// requests may edit other fields but cannot authorize a different engine.
+    pub fn set_restic_executable(&self, revision: u64, selected: &Path) -> Result<Value> {
+        let path = selected
+            .canonicalize()
+            .context("Could not resolve the selected executable")?;
+        let metadata = path.metadata()?;
+        ensure!(metadata.is_file(), "Select a regular executable file");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            ensure!(
+                metadata.permissions().mode() & 0o111 != 0,
+                "Select an executable file"
+            );
+        }
+        let mut state = self.state.lock().unwrap();
+        self.ensure_idle(&state)?;
+        ensure!(
+            revision == state.config.revision,
+            "configuration changed; select the executable again"
+        );
+        let mut config = state.config.clone();
+        config.restic_path = path
+            .to_str()
+            .context("Executable path must be valid UTF-8")?
+            .into();
+        self.save_config(&mut state, config)
+    }
+    fn save_config(&self, state: &mut State, mut config: Config) -> Result<Value> {
+        ensure!(
+            config.revision == state.config.revision,
+            "configuration changed; reload before saving"
+        );
+        config::validate(&config)?;
+        config::validate_overlap(&config, &self.directory)?;
+        for old in &state.config.repositories {
+            if let Some(new) = config.repositories.iter().find(|r| r.id == old.id) {
+                ensure!(
+                    old.location == new.location,
+                    "Repository location cannot change for an existing ID; use a new repository ID"
+                );
+            }
+        }
+        // Save/status never access the keychain. Location binding is
+        // checked when each command fetches its credential. Removing
+        // configuration deliberately leaves native entries untouched.
+        let changed_path = config.restic_path != state.config.restic_path;
+        config.revision = config
+            .revision
+            .checked_add(1)
+            .context("configuration revision overflow")?;
+        if config::write(
+            &self.directory.join("config.json"),
+            &serde_json::to_vec(&config)?,
+            true,
+        )
+        .is_err()
+        {
+            // Rename may already have committed. Keep memory unchanged,
+            // but never run it again until startup reloads durable data.
+            Self::persistence_failed(state);
+            bail!("Could not durably save configuration; restart the app before continuing");
+        }
+        state.config = config;
+        state.previews.clear();
+        if changed_path {
+            state.version = None;
+            state.setup_error =
+                Some("Restic executable changed; restart the app to validate its version".into());
+        }
+        self.status(state)
     }
     fn complete(&self, outcome: Result<Value>) {
         let mut state = self.state.lock().unwrap();

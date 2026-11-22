@@ -253,17 +253,19 @@ fn isolated_xdg_registration_and_preferences_preserve_real_state_and_override_bo
             .len(),
         2
     );
-    // Restore the exact old entry after a preference-write failure, not a new
-    // executable registration (the installed path may differ from this launch).
+    // Restore the exact owned entry after a preference-write failure.
     let bad_preferences = FilePreferences(root.path().join("missing-parent/settings.json"));
     let service = Service::new(
         Box::new(bad_preferences),
         Box::new(XdgAutostart {
             directory: Some(config.clone()),
-            executable: PathBuf::from("/opt/other/ysynk"),
+            executable: autostart.executable.clone(),
         }),
     );
-    assert!(service.save(input(false, false, false), true).is_err());
+    assert_eq!(
+        service.save(input(false, false, false), true).unwrap_err(),
+        WRITE_ERROR
+    );
     assert_eq!(fs::read(&registration).unwrap(), original);
     for unsafe_path in [
         "/opt/a b/ysynk",
@@ -288,4 +290,48 @@ fn isolated_xdg_registration_and_preferences_preserve_real_state_and_override_bo
     let broken = Service::new(Box::new(prefs), Box::new(DisabledAutostart));
     assert!(broken.get(true).is_err());
     assert_eq!(broken.preferences(), Preferences::default());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn stale_xdg_registration_is_reported_and_preserved() {
+    let root = tempfile::tempdir().unwrap();
+    let config = root.path().to_path_buf();
+    let mut adapter = XdgAutostart {
+        directory: Some(config.clone()),
+        executable: PathBuf::from("/opt/older/ysynk"),
+    };
+    adapter.set_enabled(true).unwrap();
+    let path = adapter.path().unwrap();
+    let original = fs::read(&path).unwrap();
+    adapter.executable = PathBuf::from("/opt/current/ysynk");
+    assert!(adapter.set_enabled(false).is_err());
+    assert!(adapter.set_enabled(true).is_err());
+    assert!(
+        adapter
+            .restore(&Registration {
+                enabled: false,
+                bytes: None
+            })
+            .is_err()
+    );
+    let service = Service::new(
+        Box::new(FilePreferences(config.join("settings.json"))),
+        Box::new(adapter),
+    );
+    assert!(
+        service
+            .get(true)
+            .unwrap_err()
+            .contains("different executable")
+    );
+    for enable in [true, false] {
+        assert!(
+            service
+                .save(input(enable, false, false), true)
+                .unwrap_err()
+                .contains("different executable")
+        );
+    }
+    assert_eq!(fs::read(path).unwrap(), original);
 }

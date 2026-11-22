@@ -25,11 +25,11 @@ Screenshots show the application interface with sample data.
 
 ## Install
 
-The [0.5.3 release](https://github.com/qvga/ysynk/releases/tag/v0.5.3) provides
+The [0.5.4 release](https://github.com/qvga/ysynk/releases/tag/v0.5.4) provides
 Linux x86-64 assets. For Debian/Ubuntu, download the `.deb` and install it:
 
 ```sh
-sudo apt install ./ysynk_0.5.3_amd64.deb
+sudo apt install ./ysynk_0.5.4_amd64.deb
 ```
 
 The package requires restic **0.17.1 or newer**, GTK3, WebKitGTK 4.1 and
@@ -85,9 +85,11 @@ Autostart runs after desktop login, not before login as a system service. Backup
 profiles still need an interval; changes are not watched continuously. Backups
 cannot run while the computer is off or asleep, and the desktop keychain and
 repositories must be available. An executable archive must stay at the path
-where autostart was enabled; after moving it, disable and re-enable autostart.
-The checkbox reports registration state, not whether the registered executable
-still exists. Login registration is unavailable for data-directory overrides
+where autostart was enabled. Disable autostart before moving it, then enable
+it again from the new location. If it has already moved, Settings reports
+that the entry points to a different executable. Move the old `ysynk.desktop`
+out of `$XDG_CONFIG_HOME/autostart/` (normally `~/.config/autostart/`), reload
+Settings, then enable Start at login. Login registration is unavailable for data-directory overrides
 or executable paths containing spaces or unsupported special characters; the
 Debian package uses a supported path.
 

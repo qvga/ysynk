@@ -61,6 +61,38 @@ class AdvisoryInventoryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'npm lockfile'):
                 self.scan(Path(directory), {'lockfileVersion': 3}, lambda batch: [{} for _ in batch])
 
+    def test_non_link_records_require_a_name_and_version_before_querying(self):
+        for entry in [{}, {'version': None}, {'version': ''}, {'version': 1}, {'name': '', 'version': '1'}]:
+            with self.subTest(entry=entry), tempfile.TemporaryDirectory() as directory:
+                with self.assertRaisesRegex(ValueError, 'name or version'):
+                    self.scan(Path(directory), {'lockfileVersion': 3, 'packages': {
+                        '': {}, 'node_modules/example': entry,
+                    }}, self.fail)
+
+    def test_links_require_a_matching_locked_target_and_local_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            vendor = root / 'vendor/example'
+            vendor.mkdir(parents=True)
+            packages = {'': {}, 'node_modules/alias': {'link': True, 'resolved': 'vendor/example'}}
+            lock = {'lockfileVersion': 3, 'packages': packages}
+            with self.assertRaisesRegex(ValueError, 'link target'):
+                self.scan(root, lock, self.fail)
+            packages['vendor/example'] = {'version': '1.2.3'}
+            with self.assertRaisesRegex(ValueError, 'manifest'):
+                self.scan(root, lock, self.fail)
+            for manifest in [{'name': 'example', 'version': '2.0.0'}, {'version': '1.2.3'}]:
+                (vendor / 'package.json').write_text(json.dumps(manifest))
+                with self.subTest(manifest=manifest), self.assertRaises(ValueError):
+                    self.scan(root, lock, self.fail)
+            (vendor / 'package.json').write_text(json.dumps({'name': 'example', 'version': '1.2.3'}))
+            packages['vendor/example']['name'] = 'other-package'
+            with self.assertRaisesRegex(ValueError, 'differs'):
+                self.scan(root, lock, self.fail)
+            del packages['node_modules/alias']
+            with self.assertRaisesRegex(ValueError, 'Unreferenced'):
+                self.scan(root, lock, self.fail)
+
     def test_incomplete_and_paginated_responses_fail_the_check(self):
         with tempfile.TemporaryDirectory() as directory:
             lock = {'lockfileVersion': 3, 'packages': {'': {}, 'node_modules/example': {'version': '1'}}}

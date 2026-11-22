@@ -30,10 +30,19 @@ and selection; `npm run test:dependencies` checks real plugin resolution and
 merge regressions. Re-run `tools/check_advisories.py` after lockfile changes.
 Network failure means unavailable, not zero findings.
 
-The advisory inventory uses upstream npm names for aliases and queries local
-backports from their manifests rather than their filesystem paths. Unsupported
-or incomplete npm lockfile inventories fail the check. `npm audit` does not
-replace this query: it can report zero while local-file version findings remain.
+The advisory inventory uses upstream npm names for aliases. Each installed
+package must provide a name and version. Each local link must resolve to a
+manifest inside the checkout with a name and version matching its lockfile
+target. Incomplete inventories stop the scan before it queries OSV.
+
+On November 22, 2026, OSV returned findings for six of 575 locked packages.
+The two GLib identifiers refer to the same iterator issue covered by the verified
+backport. Five packages have maintenance advisories. These include `chrono`
+0.4.45, which is present in the lockfile and absent from the active Linux
+x86-64 workspace dependency tree. The scan included the local deepmerge
+package and returned no advisory for its version. Its source fix and regression
+checks remain in place. [GLib advisory](https://osv.dev/vulnerability/GHSA-wrw7-89jp-8q8g)
+and [chrono advisory](https://rustsec.org/advisories/RUSTSEC-2026-0543.html).
 
 The single-instance plugin currently uses zbus 5. Its standalone `zbus_names`,
 `zvariant` and `zvariant_derive` dependencies have unmaintained-package

@@ -72,7 +72,7 @@ def upstream(package, root):
 
 
 def fetch_json(url):
-    request = Request(url, headers={"User-Agent": "ysynk-release-notices/0.5.3"})
+    request = Request(url, headers={"User-Agent": "ysynk-release-notices/0.5.4"})
     with urlopen(request, timeout=30) as response:
         return json.load(response)
 
@@ -223,7 +223,7 @@ def generate(metadata, cache, fetch):
             errors.append(f"{directory}: {detail}")
     if errors:
         raise ValueError("Required third-party notices unavailable:\n" + "\n".join(errors))
-    header = ("ysynk 0.5.3 - third-party notices\n"
+    header = ("ysynk 0.5.4 - third-party notices\n"
               "Scope: x86_64-unknown-linux-gnu Cargo resolve graph, excluding workspace crates;\n"
               "overinclusive: includes build/dev dependencies, not a linked-binary inventory.\n"
                "Also includes Svelte, @tauri-apps/api, clsx, esm-env, vendored deepmerge, Vite and Rolldown.\n"

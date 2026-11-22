@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "main",
-  "description": "Only the bundled main window may submit typed restic operations, request a native repository-password Save dialog, read or save desktop startup preferences, or request graceful shutdown. No generic shell, filesystem, dialog, autostart or network bridge.",
+  "description": "Only the bundled main window may submit typed restic operations, select a trusted restic executable with a native picker, request a native repository-password Save dialog, read or save desktop startup preferences, or request graceful shutdown. No generic shell, filesystem, dialog, autostart or network bridge.",
   "local": true,
   "windows": ["main"],
-  "permissions": ["allow-request", "allow-export-repository-password", "allow-get-desktop-settings", "allow-save-desktop-settings", "allow-quit"]
+  "permissions": ["allow-request", "allow-select-restic-executable", "allow-export-repository-password", "allow-get-desktop-settings", "allow-save-desktop-settings", "allow-quit"]
 }

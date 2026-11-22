@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { invoke } from '@tauri-apps/api/core';
   import { request, inDesktop } from './lib/client';
   import { JobCompletions } from './lib/jobs';
   import type { Config, Job, Request, Status } from './lib/types';
@@ -75,6 +76,15 @@
     } catch (cause) { return cause instanceof Error ? cause.message : 'Configuration could not be saved. Reload and try again.'; }
     finally { sending = false; }
   }
+  async function selectEngine() {
+    if (busy || !config) return;
+    sending = true; error = ''; notice = '';
+    try {
+      const updated = await invoke<Status | null>('select_restic_executable', { revision: config.revision });
+      if (updated) { generation++; accept(updated); notice = 'Restic executable saved.'; }
+    } catch (cause) { error = cause instanceof Error ? cause.message : typeof cause === 'string' ? cause : 'Could not select the restic executable.'; }
+    finally { sending = false; }
+  }
   async function cancel() {
     try { await request<null>({ op: 'cancel' }); notice = 'Cancellation requested. Wait for the operation to stop.'; }
     catch { error = 'Cancellation could not be sent. Reconnect and check activity.'; }
@@ -107,7 +117,7 @@
          {#if page === 'Profiles'}<Profiles {status} {busy} {ready} {save} {action}/><section class="profile-history" aria-labelledby="activity-heading"><div class="section-heading"><h2 id="activity-heading">Operation history</h2></div><Activity jobs={status.history.filter(job => job.id !== status?.active?.id)} repositories={config.repositories}/></section>
         {:else if page === 'Repositories'}<Repositories {status} {busy} {ready} {save} {run} {action}/>
         {:else if page === 'Snapshots'}<Snapshots {status} {busy} {ready} {run}/>
-        {:else}<Preferences {status} {busy} {save} {theme} changeTheme={setTheme}/>{/if}
+        {:else}<Preferences {status} {busy} {selectEngine} {theme} changeTheme={setTheme}/>{/if}
       {/if}
     </main>
     {#if status?.active}

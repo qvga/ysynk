@@ -270,6 +270,46 @@ fn existing_sftp_locators_keep_their_exact_keychain_binding_on_load_and_save() -
     Ok(())
 }
 
+#[cfg(unix)]
+#[test]
+fn only_native_selection_can_change_the_engine() -> Result<()> {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let dir = tempfile::tempdir()?;
+    let store = Arc::new(FakeStore::default());
+    let app = open(
+        dir.path().join("app"),
+        store.clone(),
+        dir.path().join("locks"),
+        &Config::default(),
+    )?;
+    let binary = dir.path().join("restic-custom");
+    fs::write(&binary, b"")?;
+    let config = Config {
+        restic_path: binary.to_str().unwrap().into(),
+        ..Config::default()
+    };
+    assert!(app.request(Request::SaveConfig { config }).is_err());
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o600))?;
+    assert!(app.set_restic_executable(0, &binary).is_err());
+    fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))?;
+    let alias = dir.path().join("selected");
+    symlink(&binary, &alias)?;
+    assert!(app.set_restic_executable(1, &alias).is_err());
+    let updated = app.set_restic_executable(0, &alias)?;
+    assert_eq!(updated["config"]["restic_path"], binary.to_str().unwrap());
+    assert_eq!(updated["config"]["revision"], 1);
+    assert!(updated["restic_version"].is_null());
+    assert!(updated["setup_error"].as_str().unwrap().contains("restart"));
+    let persisted: Config = serde_json::from_slice(&fs::read(app.directory.join("config.json"))?)?;
+    assert_eq!(persisted.restic_path, binary.to_str().unwrap());
+    assert!(
+        app.request(Request::SaveConfig { config: persisted })
+            .is_ok()
+    );
+    assert_eq!(store.state.lock().unwrap().reads, 0);
+    Ok(())
+}
+
 #[test]
 fn audit_write_failures_block_admission_and_clear_previews() -> Result<()> {
     for stage in ["publish", "directory_sync"] {
@@ -294,10 +334,7 @@ fn audit_write_failures_block_admission_and_clear_previews() -> Result<()> {
                 survivors: vec![],
             },
         );
-        let c = Config {
-            restic_path: "/new/restic".into(),
-            ..Config::default()
-        };
+        let c = Config::default();
         config::WRITE_FAILURE.with(|fault| fault.set(Some(stage)));
         assert!(app.request(Request::SaveConfig { config: c }).is_err());
         let status = app.request(Request::Status)?;

@@ -46,6 +46,12 @@ messages; it is not a public support log. Recent output remains available in
 memory for completed jobs, but is omitted from persisted operation history.
 Command arguments and environment variables are not displayed.
 
+Changing the restic executable requires choosing a local file in the native
+desktop picker. The app stores the resolved path after checking the configuration
+revision and operation state. Ordinary configuration saves must retain the
+current executable. Existing installations keep their configured engine, and
+a newly selected engine is version-checked when the app restarts.
+
 The signed-in user, OS keychain, restic executable, SSH/client helpers and host
 are trusted. An unlocked desktop keychain is not protection against malware
 running as that user or root. Child environments and process memory can be

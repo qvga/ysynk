@@ -27,6 +27,8 @@ To register a local application-menu entry, run `python3 tools/install-desktop-e
 
 A repository ID and its exact location bind a keychain credential. Preserve both when reading existing configurations. The core owns admission of repository operations and returns session results to the renderer. Changes to job state, output handling, or destructive operations should be tested through the request interface. [Security and recovery](docs/SECURITY.md)
 
+For workflow changes, the [state-machine map](docs/state-machines.md) traces job admission, cancellation and recovery across layers and lists the owner, guards and checks for each workflow.
+
 ## Run the checks
 
 ```sh
